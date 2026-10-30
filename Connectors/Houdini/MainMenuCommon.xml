@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mainMenu>
+  <addScriptItem id="h.plasma_usd_live">
+    <label>Plasma USD Live</label>
+    <parent>windows_menu</parent>
+    <insertAfter>h.python_panel_editor</insertAfter>
+    <scriptCode><![CDATA[
+import plasma_usd_live.panel
+plasma_usd_live.panel.open_panel()
+]]></scriptCode>
+  </addScriptItem>
+</mainMenu>

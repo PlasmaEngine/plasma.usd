@@ -1,0 +1,36 @@
+# Declares the .mtlx file format. plasma.usd defines the type's C++ class and factory at run time
+# (UsdMtlxFileFormat.cpp, plUsdMtlx::RegisterFileFormat), from the module it is compiled into.
+# This is a resource plugin with no LibraryPath, so OpenUSD never loads a DLL for it: the editor plugin runs
+# from a load copy, and a second copy loaded through plugInfo would duplicate its statics.
+#
+# Kept out of Schemas/, which DCCs put on PXR_PLUGINPATH_NAME: there this "mtlx" format would collide with
+# their own usdMtlx.
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "plUsdMtlxFileFormat": {
+                        "bases": [
+                            "SdfFileFormat"
+                        ],
+                        "displayName": "MaterialX through plasma.materialx",
+                        "extensions": [
+                            "mtlx"
+                        ],
+                        "formatId": "mtlx",
+                        "primary": true,
+                        "supportsEditing": false,
+                        "supportsWriting": false,
+                        "target": "usd"
+                    }
+                }
+            },
+            "LibraryPath": "",
+            "Name": "plasmaMtlx",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "resource"
+        }
+    ]
+}

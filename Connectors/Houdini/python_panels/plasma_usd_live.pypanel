@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="plasma_usd_live" label="Plasma USD Live" icon="NETWORKS_lop" showNetworkNavigationBar="false" help_url="">
+    <script><![CDATA[from plasma_usd_live import panel
+
+thePanel = None
+
+
+def onCreateInterface():
+    global thePanel
+    thePanel = panel.Panel()
+    return thePanel
+
+
+def onDestroyInterface():
+    global thePanel
+    if thePanel is not None:
+        thePanel.close_panel()
+    thePanel = None
+]]></script>
+    <includeInPaneTabMenu menu_position="450" create_separator="false"/>
+    <includeInToolbarMenu menu_position="450" create_separator="false"/>
+    <help><![CDATA[Joins the Plasma editor's USD live sessions: lists the open sessions, starts or joins a session on a USD file, and shows the session's participants, what a stronger layer outvotes, and recent sync events.]]></help>
+  </interface>
+</pythonPanelDocument>

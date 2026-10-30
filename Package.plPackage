@@ -1,0 +1,49 @@
+// plasma.usd - live, two-way OpenUSD: a USD stage opened in a scene, kept in sync with other tools.
+//
+// The AUTHORED manifest, kept in source next to the plugin. It declares identity, compatibility,
+// what to load and what to ship. Component hashes and sizes are NOT here: the packaging step
+// computes those and emits them into the published manifest that ships inside the .plpkg.
+
+PackageInfo
+{
+	// ---- identity -------------------------------------------------------------
+	string %Id{"plasma.usd"}
+	string %Version{"0.2.2"}
+	string %Publisher{"PlasmaTechnology"}
+	// OpenUSD and oneTBB are Apache-2.0 and come as DLLs, so their licences and notice are staged
+	// next to them in Bin/.
+	string %License{"MIT"}
+	string %Homepage{"https://plasmagameengine.com"}
+
+	// ---- compatibility --------------------------------------------------------
+	string %MinEngineVersion{"0.11.2"}
+	string %MaxEngineVersion{"0.11.2"}
+	string %AbiTag{"win64-msvc19-0.11.2-abi6-dev"}
+
+	// ---- presentation ---------------------------------------------------------
+	string %DisplayName{"USD Live Link"}
+	string %Category{"Tools"}
+	string %Description{"Opens OpenUSD stages in a scene and keeps them live: edits saved in Houdini, Blender or Maya appear in the editor, and moves, visibility changes and deletions made in the editor are written back as USD in the editor's own layer. USD files import as meshes, and every linked stage keeps a baked copy that exports and games use, so nothing is added to a shipped game and nothing a bake produces depends on this package."}
+	string %Icon{"Branding/UsdIcon.png"}
+	string %Banner{"Branding/UsdBanner.png"}
+
+	// ---- binaries -------------------------------------------------------------
+	// Editor only. OpenUSD lives in the editor process; the engine process renders the generated objects
+	// through the normal object mirror and receives meshes and materials as resource updates.
+	// plEnginePluginUsd runs in the editor's engine process without OpenUSD: it shows a link's bake while
+	// the link has no live objects, and exports the bake in their place.
+	string %EditorPlugins{"plEditorPluginUsd"}
+	string %EditorEnginePlugins{"plEnginePluginUsd"}
+	string %RuntimePlugins{}
+	// PackageDependencies ship with exported games; nothing a game runs uses OpenUSD, so none are listed.
+	string %PackageDependencies{}
+
+	// ---- components -----------------------------------------------------------
+	Component { string %Name{"manifest"} string %Platform{"any"} }
+	// OpenUSD, TBB, their licences and USD resource metadata are editor-only dependencies.
+	Component { string %Name{"editor-win64"} string %Platform{"win64"} string %Path{"Bin/Windows_x64_Development"} }
+	Component { string %Name{"icon"} string %Platform{"any"} }
+	Component { string %Name{"banner"} string %Platform{"any"} }
+	// The editor plugin's icons, found under their ids (":/UsdPlugin/Icons/UsdLive.svg") in EditorIcons.
+	Component { string %Name{"tool"} string %Platform{"any"} string %Path{"EditorIcons"} }
+}

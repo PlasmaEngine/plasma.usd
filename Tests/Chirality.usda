@@ -1,0 +1,67 @@
+#usda 1.0
+(
+    doc = """Chirality test for plasma.usd.
+
+    Three arms of different lengths leave the origin along +X (red, 100 units), +Y (green, 60 units)
+    and +Z (blue, 30 units), plus a small yellow marker on the +X arm's +Z side. The stage is Y-up in
+    centimetres, as USD's fallbacks assume.
+
+    A faithful import shows the same arrangement from the same viewpoint as usdview, Houdini or
+    Blender: with the green arm pointing up and the red arm pointing right, the blue arm points
+    towards the viewer and the yellow marker sits on the viewer's side of the red arm. A mirrored
+    import puts the blue arm and the marker behind."""
+    defaultPrim = "Chirality"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "Chirality" (
+    kind = "component"
+)
+{
+    def Mesh "ArmX"
+    {
+        float3[] extent = [(0, -5, -5), (100, 5, 5)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 7, 6, 6, 7, 5, 4, 4, 5, 1, 0, 1, 5, 7, 3, 4, 0, 2, 6]
+        point3f[] points = [(0, -5, 5), (100, -5, 5), (0, 5, 5), (100, 5, 5), (0, -5, -5), (100, -5, -5), (0, 5, -5), (100, 5, -5)]
+        color3f[] primvars:displayColor = [(0.85, 0.15, 0.12)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "ArmY"
+    {
+        float3[] extent = [(-5, 0, -5), (5, 60, 5)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 7, 6, 6, 7, 5, 4, 4, 5, 1, 0, 1, 5, 7, 3, 4, 0, 2, 6]
+        point3f[] points = [(-5, 0, 5), (5, 0, 5), (-5, 60, 5), (5, 60, 5), (-5, 0, -5), (5, 0, -5), (-5, 60, -5), (5, 60, -5)]
+        color3f[] primvars:displayColor = [(0.2, 0.75, 0.25)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "ArmZ"
+    {
+        float3[] extent = [(-5, -5, 0), (5, 5, 30)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 7, 6, 6, 7, 5, 4, 4, 5, 1, 0, 1, 5, 7, 3, 4, 0, 2, 6]
+        point3f[] points = [(-5, -5, 30), (5, -5, 30), (-5, 5, 30), (5, 5, 30), (-5, -5, 0), (5, -5, 0), (-5, 5, 0), (5, 5, 0)]
+        color3f[] primvars:displayColor = [(0.15, 0.35, 0.9)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Xform "Marker"
+    {
+        double3 xformOp:translate = (70, 0, 12)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Mesh "Box"
+        {
+            float3[] extent = [(-4, -4, -4), (4, 4, 4)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 7, 6, 6, 7, 5, 4, 4, 5, 1, 0, 1, 5, 7, 3, 4, 0, 2, 6]
+            point3f[] points = [(-4, -4, 4), (4, -4, 4), (-4, 4, 4), (4, 4, 4), (-4, -4, -4), (4, -4, -4), (-4, 4, -4), (4, 4, -4)]
+            color3f[] primvars:displayColor = [(0.95, 0.85, 0.1)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}

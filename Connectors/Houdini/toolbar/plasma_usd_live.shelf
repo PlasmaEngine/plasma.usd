@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<shelfDocument>
+  <toolshelf name="plasma_usd_live" label="Plasma">
+    <memberTool name="plasma_usd_live_panel"/>
+  </toolshelf>
+
+  <tool name="plasma_usd_live_panel" label="Plasma USD Live" icon="NETWORKS_lop">
+    <helpText><![CDATA[Opens the Plasma USD Live panel: join the Plasma editor's USD live sessions from Solaris.]]></helpText>
+    <toolMenuContext name="network">
+      <contextNetType>LOP</contextNetType>
+    </toolMenuContext>
+    <toolSubmenu>Plasma</toolSubmenu>
+    <script scriptType="python"><![CDATA[import plasma_usd_live.panel
+plasma_usd_live.panel.open_panel()]]></script>
+  </tool>
+</shelfDocument>

@@ -1,0 +1,136 @@
+#usda 1.0
+(
+    doc = """Small set for exercising plasma.usd: nested transforms in the three common xform-op
+    styles (translate/rotateXYZ/scale, a single matrix, and none), a mesh with face-varying UVs and
+    normals, a material bound through UsdPreviewSurface, a light, a camera, an animated attribute
+    and an invisible prim."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 1
+    endTimeCode = 48
+)
+
+def Xform "World"
+{
+    def Xform "Dock"
+    {
+        double3 xformOp:translate = (0, 0, -2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Xform "Crane_01"
+        {
+            double3 xformOp:translate = (4, 0, 1)
+            float3 xformOp:rotateXYZ = (0, 30, 0)
+            float3 xformOp:scale = (1, 1, 1)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+            def Mesh "Boom" (
+                prepend apiSchemas = ["MaterialBindingAPI"]
+            )
+            {
+                float3[] extent = [(-0.25, 0, -0.25), (0.25, 6, 0.25)]
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 7, 6, 6, 7, 5, 4, 4, 5, 1, 0, 1, 5, 7, 3, 4, 0, 2, 6]
+                point3f[] points = [(-0.25, 0, 0.25), (0.25, 0, 0.25), (-0.25, 6, 0.25), (0.25, 6, 0.25), (-0.25, 0, -0.25), (0.25, 0, -0.25), (-0.25, 6, -0.25), (0.25, 6, -0.25)]
+                texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1)] (
+                    interpolation = "faceVarying"
+                )
+                rel material:binding = </World/Looks/M_Rust>
+                uniform token subdivisionScheme = "none"
+            }
+        }
+
+        def Mesh "Pier"
+        {
+            float3[] extent = [(-5, -0.2, -1.5), (5, 0, 1.5)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-5, 0, 1.5), (5, 0, 1.5), (5, 0, -1.5), (-5, 0, -1.5)]
+            normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (
+                interpolation = "faceVarying"
+            )
+            color3f[] primvars:displayColor = [(0.45, 0.36, 0.28)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Scope "Props"
+    {
+        def Xform "Crate_07"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3.5, 0.5, 1.2, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+            def Cube "Box"
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.6, 0.45, 0.25)]
+            }
+        }
+
+        def Xform "Barrel_02"
+        {
+            token visibility = "invisible"
+            double3 xformOp:translate = (5, 0.5, -1)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Sphere "Body"
+            {
+                double radius = 0.5
+            }
+        }
+
+        def Xform "Buoy"
+        {
+            double3 xformOp:translate.timeSamples = {
+                1: (-3, 0, 2),
+                24: (-3, 0.4, 2),
+                48: (-3, 0, 2),
+            }
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Sphere "Float"
+            {
+                double radius = 0.3
+                color3f[] primvars:displayColor = [(0.9, 0.2, 0.15)]
+            }
+        }
+    }
+
+    def Scope "Lights"
+    {
+        def SphereLight "DockLamp"
+        {
+            color3f inputs:color = (1, 0.85, 0.7)
+            float inputs:intensity = 40
+            float inputs:radius = 0.1
+            double3 xformOp:translate = (2, 4, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def Camera "Shot_A"
+    {
+        float focalLength = 35
+        double3 xformOp:translate = (0, 2, 12)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Scope "Looks"
+    {
+        def Material "M_Rust"
+        {
+            token outputs:surface.connect = </World/Looks/M_Rust/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.55, 0.27, 0.12)
+                float inputs:metallic = 0.6
+                float inputs:roughness = 0.7
+                token outputs:surface
+            }
+        }
+    }
+}

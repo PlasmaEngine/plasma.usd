@@ -1,0 +1,22 @@
+// for a description of the options see:
+// https://plengine.net/pages/docs/editor/editor-plugins.html
+
+PluginInfo
+{
+	string %DisplayName{"USD Live Link"}
+	string %Category{"Tools"}
+	string %MinEngineVersion{"0.11.2"}
+	string %MaxEngineVersion{"0.11.2"}
+	string %Icon{"UsdIcon.png"}
+	string %Banner{"UsdBanner.png"}
+	string %Description{"Opens OpenUSD stages in scenes and prefabs and keeps them live with Blender, Houdini and Maya, imports USD files as meshes, and keeps a baked copy of every linked stage for exports and games. Nothing is added to a shipped game."}
+	string %ImporterFileTypes{"usd", "usda", "usdc", "usdz"}
+	string %EditorPlugins{"plEditorPluginUsd"}
+	string %EditorEnginePlugins{"plEnginePluginUsd"}
+	string %RuntimePlugins{}
+	string %PackageDependencies{}
+	string %RequiredPlugins{}
+	string %ExclusiveFeatures{}
+	string %EnabledInTemplates{}
+	string %PlasmaBuildTargetName{"EditorPluginUsd"}
+}

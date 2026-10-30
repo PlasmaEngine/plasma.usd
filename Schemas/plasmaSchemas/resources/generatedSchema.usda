@@ -1,0 +1,15 @@
+#usda 1.0
+(
+    "Codeless schema of the plasma.usd package. Written by hand; it declares no properties, so there is nothing to generate."
+)
+
+class "PlasmaComponentAPI" (
+    customData = {
+        string userDocBrief = """A Plasma engine component on this prim.
+The instance name is the component's type, e.g. PlasmaComponentAPI:plJoltDynamicActorComponent, and the component's
+values are the attributes plasma:<type>:<property>, in the units and frame Plasma uses. Tools without this schema keep
+both as they are."""
+    }
+)
+{
+}

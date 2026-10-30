@@ -1,0 +1,113 @@
+#usda 1.0
+(
+    doc = """Lights and cameras for plasma.usd: one prim per UsdLux light the engine maps, a dome light it doesn't, and
+    a camera with a child, so the look correction and its compensation on children can be checked. Centimetre stage."""
+    defaultPrim = "World"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "Shot" (
+        doc = "Looks along -Z like every USD camera; its Marker child sits 1 m in front of it."
+    )
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        float2 clippingRange = (10, 100000)
+        float fStop = 2.8
+        float focusDistance = 500
+        float exposure = 1
+        double3 xformOp:translate = (0, 150, 600)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Xform "Marker"
+        {
+            double3 xformOp:translate = (0, 0, -100)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def SphereLight "Bulb"
+    {
+        color3f inputs:color = (1, 0.6, 0.3)
+        float inputs:intensity = 2000
+        float inputs:radius = 5
+        double3 xformOp:translate = (-200, 250, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def SphereLight "Spot" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:intensity = 8000
+        float inputs:radius = 2
+        float inputs:shaping:cone:angle = 30
+        float inputs:shaping:cone:softness = 0.5
+        double3 xformOp:translate = (200, 300, 0)
+        float3 xformOp:rotateXYZ = (-90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "Sun" (
+        prepend apiSchemas = ["ShadowAPI"]
+    )
+    {
+        float inputs:angle = 0.53
+        float inputs:intensity = 100000
+        bool inputs:shadow:enable = 1
+        float3 xformOp:rotateXYZ = (-50, 30, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def RectLight "Panel"
+    {
+        float inputs:width = 100
+        float inputs:height = 50
+        float inputs:intensity = 20
+        bool inputs:normalize = 1
+        double3 xformOp:translate = (0, 200, -300)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DiskLight "Disk"
+    {
+        float inputs:radius = 25
+        float inputs:intensity = 500
+        bool inputs:enableColorTemperature = 1
+        float inputs:colorTemperature = 3200
+        double3 xformOp:translate = (-300, 100, -100)
+        float3 xformOp:rotateXYZ = (0, 90, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def CylinderLight "Tube"
+    {
+        float inputs:length = 120
+        float inputs:radius = 2
+        float inputs:intensity = 300
+        double3 xformOp:translate = (300, 100, -100)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 1
+    }
+
+    def Mesh "Floor"
+    {
+        float3[] extent = [(-500, 0, -500), (500, 0, 500)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-500, 0, 500), (500, 0, 500), (500, 0, -500), (-500, 0, -500)]
+        normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (
+            interpolation = "faceVarying"
+        )
+        color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]
+        uniform token subdivisionScheme = "none"
+    }
+}

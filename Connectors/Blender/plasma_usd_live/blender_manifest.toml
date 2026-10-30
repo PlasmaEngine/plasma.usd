@@ -1,0 +1,16 @@
+schema_version = "1.0.0"
+
+id = "plasma_usd_live"
+version = "0.3.0"
+name = "Plasma USD Live"
+tagline = "Join Plasma USD live sessions and edit the stage together"
+maintainer = "PlasmaTech"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Read USD stages, write this Blender's session layer"
+network = "Connect to the Plasma editor's live hub on this computer"
