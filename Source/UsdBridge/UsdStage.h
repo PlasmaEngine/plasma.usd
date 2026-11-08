@@ -74,9 +74,8 @@ enum class plUsdLightShape : plUInt8
 /// divides that by its surface area instead, so its power stays the same whatever its size. A distant light's value is
 /// read as illuminance in lux.
 ///
-/// Unreal's exporter writes a sphere light's luminance as its candela over the sphere's whole surface, 4 pi r^2, where
-/// USD's model gives the disc the sphere shows, pi r^2. Its sphere lights are four times brighter than their luminance
-/// says; m_bUnrealUnits marks them.
+/// Unreal's exporter divides punctual candela by solidAngle * radius^2 (clamped to 1e-4 m^2), using the spot cone's
+/// solid angle for spotlights. Area lights use their emitting surface area. m_bUnrealUnits selects that convention.
 struct plUsdLight
 {
   plUsdLightShape m_Shape = plUsdLightShape::Other;
@@ -90,11 +89,17 @@ struct plUsdLight
   float m_fWidth = 0.0f;  ///< Rect.
   float m_fHeight = 0.0f; ///< Rect.
   float m_fLength = 0.0f; ///< Cylinder.
+  float m_fRange = 0.0f; ///< Authored attenuation range in metres; zero uses the renderer's automatic range.
   plAngle m_ConeAngle = plAngle::MakeFromDegree(180.0f); ///< Full opening angle of a shaping cone; 180 degrees means none.
   float m_fConeSoftness = 0.0f;                          ///< 0 to 1: how much of the cone fades out.
   float m_fDiffuse = 1.0f;
   float m_fSpecular = 1.0f;
   bool m_bCastShadows = true;
+
+  /// Unreal exports lumens divided by its solid angle and emitting area. Invert that conversion in metres.
+  float GetUnrealLumensPerNit() const;
+
+  float GetUnrealSolidAngle() const;
 
   bool operator==(const plUsdLight& rhs) const;
 
@@ -116,6 +121,7 @@ struct plUsdLight
     func(ref_light.m_fWidth);
     func(ref_light.m_fHeight);
     func(ref_light.m_fLength);
+    func(ref_light.m_fRange);
     func(ref_light.m_ConeAngle);
     func(ref_light.m_fConeSoftness);
     func(ref_light.m_fDiffuse);
@@ -218,9 +224,8 @@ struct plUsdPrim
   plUsdPrimKind m_Kind = plUsdPrimKind::Group;
   plInt32 m_iParent = -1; ///< Index into the array ReadPrims filled, or -1 for a top-level prim.
 
-  /// In Plasma's frame, metres. A light or camera's transform includes plUsdBasis::GetLookCorrection, so a Plasma light or
-  /// camera component on its object faces the way the prim does; its children's transforms take the correction out
-  /// again. AuthorLocalTransform expects transforms in the same form.
+  /// In Plasma's frame, metres. Lights and cameras include a look correction, with rect/disk lights flipped for their
+  /// -X emission axis. Children's transforms remove their parent's correction. AuthorLocalTransform expects this form.
   plTransform m_LocalTransform = plTransform::MakeIdentity();
   bool m_bVisible = true;            ///< False when this prim authors visibility = invisible.
   bool m_bActive = true;             ///< False when the prim is deactivated; it then has no children.
@@ -395,6 +400,9 @@ public:
   /// \brief Snapshots the geometry of a Mesh or Gprim for building on another thread. Returns nullptr and a failure
   /// status when the prim has no geometry the engine can use.
   plUniquePtr<plUsdGeometrySource> CaptureGeometry(plStringView sPrimPath, plStatus& out_status) const;
+
+  /// Reads only the points array, before capturing normals, UVs and topology or admitting a build.
+  plUInt64 GetGeometryPointCount(plStringView sPrimPath) const;
 
   /// \brief CaptureGeometry followed by Build, on the calling thread.
   plStatus ExtractGeometry(plStringView sPrimPath, plGeometry& out_geometry) const;

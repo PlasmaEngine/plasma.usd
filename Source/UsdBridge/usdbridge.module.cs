@@ -13,6 +13,7 @@ public class UsdBridgeModule : ModuleRules
             "UsdBridgePCH.h", "BUILDSYSTEM_BUILDING_USDBRIDGE_LIB");
 
         PlasmaPackageOpenUsd.ConfigureConsumer(this, context, bCopyRuntime: true);
+        PublicDependencies.Add("UsdMikkModule");
 
         // .mtlx layers: plasma.materialx reads a document into plModelImporter2 material graphs, which ModelImporter2's
         // resolver lowers onto OpenPBR (UsdMtlxReader.cpp).
@@ -21,5 +22,12 @@ public class UsdBridgeModule : ModuleRules
         // OpenUSD's headers use RTTI (TfType) and some of its API reports failure by throwing.
         EnableExceptions = true;
         EnableRTTI = true;
+
+        // Geometry conversion runs per face corner and over large USD arrays. Keep the Development ABI and
+        // assertions, but optimize these loops instead of inheriting the workspace's unoptimized defaults.
+        if (context.Configuration == BuildConfiguration.Development)
+        {
+            OptimizeCode = OptimizationLevel.Shipping;
+        }
     }
 }

@@ -19,6 +19,13 @@ class plRTTI;
 class PL_EDITORPLUGINUSD_DLL plUsdPrimComponents
 {
 public:
+  /// Direct removals have no undo owner. Destroy the detached object and its children as well.
+  static plStatus RemoveObject(plDocumentObjectManager* pManager, const plDocumentObject* pObject);
+
+  /// Binds materials on the component so geometry can be shared independently of its materials.
+  static void ApplyMaterials(plDocumentObjectManager* pManager, const plDocumentObject* pComponent,
+    plStringView sLinkId, plArrayPtr<const plUsdMaterialGroup> groups);
+
   /// \brief The component type for a prim, or nullptr when it needs none.
   static const plRTTI* GetComponentType(const plUsdPrim& prim);
 

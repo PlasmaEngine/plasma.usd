@@ -5,6 +5,7 @@
 #include <Foundation/Containers/Deque.h>
 #include <Foundation/Containers/HashTable.h>
 #include <Foundation/Containers/Set.h>
+#include <Foundation/Threading/AtomicInteger.h>
 #include <Foundation/Threading/TaskSystem.h>
 #include <Foundation/Time/Time.h>
 #include <Foundation/Types/Uuid.h>
@@ -95,7 +96,7 @@ public:
   bool HasUnsavedChanges() const { return m_Stage.IsOpen() && m_Stage.IsEditLayerDirty(); }
   plStringView GetStatus() const { return m_sStatus; }
   plUInt32 GetPrimCount() const { return m_Prims.GetCount(); }
-  plUInt32 GetPendingMeshCount() const { return m_MeshQueue.GetCount() + m_Jobs.GetCount(); }
+  plUInt32 GetPendingMeshCount() const { return m_MeshQueue.GetCount() + m_RefineQueue.GetCount() + m_Jobs.GetCount(); }
   const plUsdBasis& GetBasis() const { return m_Stage.GetBasis(); }
   void GetLayers(plDynamicArray<plUsdLayerInfo>& out_layers) const { m_Stage.GetLayerStack(out_layers); }
   plUInt32 CountLayerOpinions(plStringView sLayerIdentifier) const { return m_Stage.CountLayerOpinions(sLayerIdentifier); }
@@ -220,15 +221,32 @@ private:
   /// referenced asset.
   struct Mesh
   {
+    bool m_bComplete = false; ///< Only complete meshes may enter a bake or a reusable cache checkpoint.
+    bool m_bPreview = false;
+    plString m_sPreviewResource;
     plString m_sName;            ///< See plUsdBakeStore::GetMeshName.
+    plString m_sCacheName;       ///< Legacy/spec key retained for fast reopen and existing cache compatibility.
+    plString m_sBuildName;       ///< Immutable content-addressed output, independent of material bindings.
+    plString m_sSourcePrim;
+    plUInt64 m_uiSourceKey = 0;
+    plUInt64 m_uiContentKey = 0;
+    plUInt64 m_uiEstimatedPoints = plMath::MaxValue<plUInt64>();
     plUInt64 m_uiFileStamp = 0;  ///< plUsdGeometryKey::m_uiFileStamp as of the last time a prim asked for the mesh.
     plUInt32 m_uiParts = 0;      ///< Of the files that exist; 0 until the first build finished.
     plUInt32 m_uiGeneration = 0; ///< Counts build requests; a build that finishes after a newer request is dropped.
     bool m_bQueued = false;
+    bool m_bPreviewPending = false;
   };
 
   struct MeshJob
   {
+    plAtomicBool m_Cancelled;
+    bool m_bPreviewOnly = false;
+    plUInt64 m_uiContentKey = 0;
+    plTime m_Started;
+    plTime m_CaptureTime;
+    plString m_sPreviewResource;
+    plUInt64 m_uiPointCount = 0; ///< Immutable memory-budget estimate, retained after the worker releases its source.
     plUInt64 m_uiMeshKey = 0;
     plUInt32 m_uiGeneration = 0;
     plString m_sMesh;
@@ -238,7 +256,6 @@ private:
     plUniquePtr<plUsdGeometrySource> m_pSource;
     plDynamicArray<plDynamicArray<plUInt8>> m_Parts; ///< Freed once the task wrote them.
     plUInt32 m_uiPartCount = 0;
-    plDynamicArray<bool> m_ReplacedParts; ///< Per part: the task overwrote an older file, which the engine may have loaded.
     plStatus m_Result;
     plTaskGroupID m_TaskGroup;
   };
@@ -252,6 +269,14 @@ private:
   void LaunchMeshJobs();
   void FinishMeshJobs(bool bWait);
   void ApplyMeshJob(MeshJob& job);
+
+  void ApplyMeshUsers(plUInt64 uiMeshKey, plUInt32 uiParts, bool bForce = false);
+
+  void AdoptCachedMesh(plUInt64 uiMeshKey, plStringView sMesh, const plUsdBakeStore::MeshEntry& entry);
+
+  void FlushMeshApplications();
+
+  void PrioritizeMeshes();
 
   /// \brief Records a finished build's files in the manifest. False when the build failed or was superseded.
   bool RecordMeshJob(const MeshJob& job);
@@ -327,6 +352,9 @@ private:
   /// \brief Writes the bake prefab when its content hash differs from the last bake's, and adds the USD Bake object.
   void RunBake();
 
+  /// Persists completed meshes while the rest of the stage is still importing.
+  void CheckpointMeshCache();
+
   plDocument* m_pDocument = nullptr;
   plAssetDocument* m_pAssetDocument = nullptr;
   plUuid m_RootObject;
@@ -345,7 +373,19 @@ private:
   plHashTable<plUuid, plString> m_ObjectToPrim;
 
   plHashTable<plUInt64, Mesh> m_Meshes; ///< By mesh key.
+  struct SourceContent
+  {
+    plString m_sMesh;
+    plUInt64 m_uiKey = 0;
+    plUInt64 m_uiPoints = 0;
+  };
+
+  plHashTable<plUInt64, SourceContent> m_SourceContents; ///< Geometry specs + stamp, independent of material bindings.
   plDeque<plUInt64> m_MeshQueue;        ///< Mesh keys waiting for a build.
+  plDeque<plUInt64> m_RefineQueue;      ///< Full builds never block admission of first previews.
+  plHashTable<plUInt64, plHybridArray<plString, 4>> m_MeshUsers;
+  plDeque<plString> m_ApplyQueue;
+  plSet<plString> m_PendingApplications;
   plDynamicArray<plUniquePtr<MeshJob>> m_Jobs;
 
   /// Mesh prim -> the point instancers that draw it; see MarkInstancersUsing. Rebuilt when an instancer changed.
@@ -368,6 +408,7 @@ private:
   plSet<plString> m_DirtyUserComponents; ///< Prims whose objects got user components added, changed or removed.
 
   plTime m_NextPoll;
+  plTime m_NextPriorityUpdate;
   plTime m_SaveDue;
   bool m_bSaveScheduled = false;
 
@@ -376,6 +417,8 @@ private:
 
   plUsdBakeStore::Manifest m_Manifest; ///< Loaded on the first Open and kept up to date as meshes are built.
   bool m_bManifestLoaded = false;
+  bool m_bManifestDirty = false;
+  plTime m_NextManifestSave;
   bool m_bBakeCheckPending = false;
   plTime m_BakeDue;
   plString m_sBakeStatus;

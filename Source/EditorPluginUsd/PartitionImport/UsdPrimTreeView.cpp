@@ -214,6 +214,39 @@ void plUsdPrimTreeView::SetChecked(plUInt32 uiItem, bool bChecked)
   m_pRows->Refresh();
 }
 
+void plUsdPrimTreeView::SetAllChecked(bool bChecked)
+{
+  for (Item& item : m_Items)
+  {
+    if (item.m_bEnabled && item.m_bCheckable)
+    {
+      item.m_bChecked = bChecked;
+    }
+  }
+
+  UpdateStates();
+  m_pRows->Refresh();
+}
+
+bool plUsdPrimTreeView::AreAllChecked() const
+{
+  bool bHasCheckBox = false;
+  for (const Item& item : m_Items)
+  {
+    if (item.m_bEnabled && item.m_bCheckable)
+    {
+      if (!item.m_bChecked)
+      {
+        return false;
+      }
+
+      bHasCheckBox = true;
+    }
+  }
+
+  return bHasCheckBox;
+}
+
 void plUsdPrimTreeView::ToggleCheck(plUInt32 uiItem)
 {
   if (uiItem >= m_Items.GetCount() || m_States[uiItem] == Check::None)

@@ -32,6 +32,10 @@ public:
   {
     plUInt64 m_uiFileStamp = 0; ///< plUsdGeometryKey::m_uiFileStamp of the geometry the files were built from.
     plUInt32 m_uiParts = 0;
+    plString m_sResourceMesh;    ///< Optional content-addressed geometry shared by links and material bindings.
+    plString m_sPreviewResource; ///< A validated preview may be checkpointed before final parts exist.
+    plDynamicArray<plUInt64> m_PartSizes;
+    plUInt64 m_uiPreviewSize = 0;
   };
 
   struct Manifest
@@ -89,6 +93,10 @@ public:
 
   static void LoadManifest(plStringView sLinkId, Manifest& out_manifest);
   static plResult SaveManifest(plStringView sLinkId, const Manifest& manifest);
+
+  /// \brief Manifest I/O with an explicit absolute path, independent of the open editor project.
+  static void LoadManifestFile(plStringView sFile, Manifest& out_manifest);
+  static plResult SaveManifestFile(plStringView sFile, const Manifest& manifest);
 
   /// \brief Replaces out_layers with the stage's layer files and their modification times in microseconds. Returns false
   /// when one was modified after iSince.

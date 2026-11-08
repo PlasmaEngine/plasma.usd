@@ -877,16 +877,15 @@ void plEngineUsdLiveView::GatherStatus(plUsdLiveLink* pLink)
   plStringBuilder s;
   s.SetFormat("Objects {}", pLink->GetPrimCount());
 
-  if (pLink->GetPendingMeshCount() > 0)
-    s.AppendFormat("{}building {} meshes", Sep, pLink->GetPendingMeshCount());
-
   if (pLink->IsWritable())
     s.AppendFormat("{}your opinions {}", Sep, pLink->CountLayerOpinions(pLink->GetParticipantLayer()));
 
-  // the link's own status repeats the above, except when it reports a problem
+  // Include streaming progress as well as errors; the object count alone does not show visibility.
   const plStringView sStatus = pLink->GetStatus();
-  if (!sStatus.IsEmpty() && !sStatus.StartsWith("Live") && !sStatus.StartsWith("Read-only") && !sStatus.StartsWith("Building"))
+  if (!sStatus.IsEmpty() && !sStatus.StartsWith("Live") && !sStatus.StartsWith("Read-only"))
+  {
     s.AppendFormat("{}{}", Sep, sStatus);
+  }
 
   if (!sBackground.IsEmpty())
     s.AppendFormat("{}{}", Sep, sBackground);

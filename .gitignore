@@ -37,6 +37,8 @@ Package.sha256
 
 # Package build output and local run logs
 Bin/
+/Tests/.live/LightRegression/
+/Tests/.live/LightRegressionY/
 *.locked*
 _build.log
 plMemoryLeaks.txt

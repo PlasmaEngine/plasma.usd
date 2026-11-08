@@ -1,18 +1,24 @@
 #include <EditorPluginUsd/EditorPluginUsdPCH.h>
 
+#include <Core/Graphics/Geometry.h>
 #include <Core/World/GameObject.h>
-#include <EditorPluginUsd/Bake/UsdBakePrefab.h>
-#include <EditorPluginUsd/LiveLink/UsdBakeStore.h>
 #include <EditorEngineProcessFramework/EngineProcess/EngineProcessMessages.h>
 #include <EditorFramework/Assets/AssetDocument.h>
+#include <EditorFramework/Document/GameObjectDocument.h>
+#include <EditorFramework/DocumentWindow/EngineDocumentWindow.h>
+#include <EditorFramework/DocumentWindow/EngineViewWidget.h>
 #include <EditorFramework/GUI/ObjectRowDecorator.h>
+#include <EditorPluginUsd/Bake/UsdBakePrefab.h>
+#include <EditorPluginUsd/LiveLink/UsdBakeStore.h>
 #include <EditorPluginUsd/LiveLink/UsdLiveLink.h>
 #include <EditorPluginUsd/LiveLink/UsdLiveManager.h>
 #include <EditorPluginUsd/LiveLink/UsdLiveResources.h>
-#include <EditorPluginUsd/LiveLink/UsdPrimComponents.h>
 #include <EditorPluginUsd/LiveLink/UsdLiveTextures.h>
+#include <EditorPluginUsd/LiveLink/UsdMeshCache.h>
+#include <EditorPluginUsd/LiveLink/UsdPrimComponents.h>
 #include <Foundation/Algorithm/HashingUtils.h>
 #include <Foundation/IO/OSFile.h>
+#include <Foundation/Profiling/Profiling.h>
 #include <Foundation/System/SystemInformation.h>
 #include <Foundation/Threading/DelegateTask.h>
 #include <RendererCore/Meshes/InstancedMeshComponent.h>
@@ -36,11 +42,16 @@ namespace
     return s;
   }
 
-  /// Meshes are built on worker tasks. Large ones need a lot of transient memory (a million vertices take a few hundred
-  /// MB), so only a few run at once: a quarter of the cores, between 2 and 6.
+  /// Leave room for the USD stage, engine and other tools. Dense meshes need substantial transient memory, so adding
+  /// workers under memory pressure makes imports slower through paging.
   plUInt32 GetMaxConcurrentMeshJobs()
   {
-    return plMath::Clamp<plUInt32>(plSystemInformation::Get().GetCPUCoreCount() / 4, 2, 6);
+    const auto& system = plSystemInformation::Get();
+    const plUInt32 uiCpuLimit = plMath::Clamp<plUInt32>(system.GetCPUCoreCount() / 4, 2, 6);
+    const plUInt64 available = system.GetAvailableMainMemory();
+    constexpr plUInt64 GiB = 1024ull * 1024ull * 1024ull;
+    const plUInt64 uiMemoryLimit = available > GiB ? plMath::Max<plUInt64>((available - GiB) / (2 * GiB), 1) : 1;
+    return (plUInt32)plMath::Min<plUInt64>(uiCpuLimit, uiMemoryLimit);
   }
 
   /// How often the layer files are checked for changes saved by other tools.
@@ -145,7 +156,7 @@ plString plUsdLiveLink::GetMeshResource(const PrimState& state, plUInt32 uiPart)
   if (pMesh == nullptr)
     return {};
 
-  return plUsdBakeStore::GetMeshResource(pMesh->m_sName, uiPart);
+  return pMesh->m_bPreview ? pMesh->m_sPreviewResource : plUsdBakeStore::GetMeshResource(pMesh->m_sName, uiPart);
 }
 
 plString plUsdLiveLink::GetMaterialResource(const plUsdMaterialGroup& group) const
@@ -281,6 +292,12 @@ void plUsdLiveLink::RunBake()
     {
       if (const Mesh* pMesh = m_Meshes.GetValue(pState->m_uiAppliedMeshKey))
       {
+        if (!pMesh->m_bComplete)
+        {
+          m_sBakeStatus = "Waiting for full-quality meshes";
+          return;
+        }
+
         nodes[i].m_uiMeshParts = pState->m_uiMeshParts;
         nodes[i].m_sMesh = pMesh->m_sName;
       }
@@ -337,7 +354,12 @@ void plUsdLiveLink::RunBake()
 void plUsdLiveLink::Close(bool bRemoveObjects)
 {
   FinishMeshJobs(true);
+  CheckpointMeshCache();
   m_MeshQueue.Clear();
+  m_RefineQueue.Clear();
+  m_MeshUsers.Clear();
+  m_ApplyQueue.Clear();
+  m_PendingApplications.Clear();
 
   if (m_Stage.IsOpen() && m_Stage.IsEditLayerDirty())
   {
@@ -353,7 +375,7 @@ void plUsdLiveLink::Close(bool bRemoveObjects)
     {
       if (const plDocumentObject* pObject = accessor.GetObject(it.Value().m_Object))
       {
-        accessor.RemoveObject(pObject).IgnoreResult();
+        plUsdPrimComponents::RemoveObject(m_pDocument->GetObjectManager(), pObject).IgnoreResult();
       }
 
       m_pDocument->GetObjectManager()->SetObjectTransient(it.Value().m_Object, false);
@@ -370,6 +392,7 @@ void plUsdLiveLink::Close(bool bRemoveObjects)
   m_Prims.Clear();
   m_ObjectToPrim.Clear();
   m_Meshes.Clear();
+  m_SourceContents.Clear();
   m_InstancersByMesh.Clear();
   m_bInstancersByMeshDirty = true;
   m_PendingMaterials.Clear();
@@ -444,6 +467,7 @@ void plUsdLiveLink::Update()
   }
 
   FinishMeshJobs(false);
+  FlushMeshApplications();
   FlushInstancers();
 
   if (m_bResendMaterials && IsEngineReady())
@@ -484,6 +508,11 @@ void plUsdLiveLink::Update()
 
   const plTime now = plTime::Now();
 
+  if (m_bManifestDirty && now >= m_NextManifestSave)
+  {
+    CheckpointMeshCache();
+  }
+
   if (m_bSaveScheduled && now >= m_SaveDue)
   {
     SaveNow().IgnoreResult();
@@ -509,7 +538,7 @@ void plUsdLiveLink::Update()
   LaunchMeshJobs();
 
   // The bake waits until the link is idle: every mesh built, every texture prepared, nothing left to sync.
-  if (m_bBakeCheckPending && now >= m_BakeDue && GetPendingMeshCount() == 0 && m_PendingMaterials.IsEmpty() && !m_bSyncPending &&
+  if (m_bBakeCheckPending && now >= m_BakeDue && GetPendingMeshCount() == 0 && m_ApplyQueue.IsEmpty() && m_PendingMaterials.IsEmpty() && !m_bSyncPending &&
       !m_pDocument->GetCommandHistory()->IsInTransaction() && IsEngineReady())
   {
     RunBake();
@@ -519,7 +548,23 @@ void plUsdLiveLink::Update()
   {
     plStringBuilder s;
     if (GetPendingMeshCount() > 0)
-      s.SetFormat("Building meshes: {} left", GetPendingMeshCount());
+    {
+      plUInt32 visible = 0, complete = 0, meshes = 0;
+      for (auto it = m_Prims.GetIterator(); it.IsValid(); ++it)
+      {
+        if (it.Value().m_uiMeshKey == 0)
+        {
+          continue;
+        }
+
+        ++meshes;
+        visible += it.Value().m_uiMeshParts > 0 ? 1 : 0;
+        const Mesh* mesh = m_Meshes.GetValue(it.Value().m_uiMeshKey);
+        complete += mesh != nullptr && mesh->m_bComplete ? 1 : 0;
+      }
+
+      s.SetFormat("Building: {} / {} mesh objects visible, {} refined, {} active builds", visible, meshes, complete, m_Jobs.GetCount());
+    }
     else if (IsWritable())
       s.SetFormat("Live: {} prims, session '{}'", m_Prims.GetCount(), m_Settings.m_sSessionName);
     else
@@ -676,7 +721,7 @@ void plUsdLiveLink::Sync()
       // Removing a parent takes its children with it, so a child may already be gone.
       if (const plDocumentObject* pObject = accessor.GetObject(object))
       {
-        accessor.RemoveObject(pObject).IgnoreResult();
+        plUsdPrimComponents::RemoveObject(m_pDocument->GetObjectManager(), pObject).IgnoreResult();
       }
 
       m_pDocument->GetObjectManager()->SetObjectTransient(object, false);
@@ -898,7 +943,26 @@ void plUsdLiveLink::ForgetUndoHistory(plStringView sReason)
 
 void plUsdLiveLink::RequireMesh(plStringView sPrimPath, PrimState& ref_state, const plUsdGeometryKey& geometry, bool bRebuild)
 {
+  const plUInt64 sourceKey = plHashingUtils::xxHash64(&geometry.m_uiFileStamp, sizeof(geometry.m_uiFileStamp), geometry.m_uiIdentity);
+  if (bRebuild)
+  {
+    m_SourceContents.Remove(sourceKey);
+  }
+
   const plUInt64 uiMeshKey = plUsdBakeStore::GetMeshKey(m_sLinkId, geometry, ref_state.m_MaterialGroups);
+  if (ref_state.m_uiMeshKey != uiMeshKey)
+  {
+    if (auto* users = m_MeshUsers.GetValue(ref_state.m_uiMeshKey))
+    {
+      users->RemoveAndSwap(plString(sPrimPath));
+    }
+  }
+
+  auto& users = m_MeshUsers[uiMeshKey];
+  if (!users.Contains(sPrimPath))
+  {
+    users.PushBack(sPrimPath);
+  }
   ref_state.m_uiMeshKey = uiMeshKey;
 
   Mesh* pMesh = nullptr;
@@ -906,20 +970,38 @@ void plUsdLiveLink::RequireMesh(plStringView sPrimPath, PrimState& ref_state, co
   {
     pMesh = &m_Meshes[uiMeshKey];
     pMesh->m_sName = plUsdBakeStore::GetMeshName(m_sLinkId, geometry, uiMeshKey);
+    pMesh->m_sCacheName = pMesh->m_sName;
 
     // Built in an earlier session from the same layer files: the files are current.
     const plUsdBakeStore::MeshEntry* pEntry = m_Manifest.m_Meshes.GetValue(pMesh->m_sName);
-    if (!bRebuild && pEntry != nullptr && pEntry->m_uiFileStamp == geometry.m_uiFileStamp && plUsdBakeStore::HasMeshFiles(pMesh->m_sName, pEntry->m_uiParts))
+    const plString resourceMesh = pEntry != nullptr && !pEntry->m_sResourceMesh.IsEmpty() ? pEntry->m_sResourceMesh : pMesh->m_sName;
+    if (!bRebuild && pEntry != nullptr && pEntry->m_uiFileStamp == geometry.m_uiFileStamp && plUsdBakeStore::HasMeshFiles(resourceMesh, pEntry->m_uiParts))
+    {
+      pMesh->m_sName = resourceMesh;
       pMesh->m_uiParts = pEntry->m_uiParts;
+      pMesh->m_bComplete = true;
+    }
     else
+    {
+      if (!bRebuild && pEntry != nullptr && pEntry->m_uiFileStamp == geometry.m_uiFileStamp &&
+          pEntry->m_sPreviewResource == plUsdMeshCache::GetPreviewResource(resourceMesh) && plOSFile::ExistsFile(plUsdBakeStore::ToAbsolutePath(pEntry->m_sPreviewResource)))
+      {
+        pMesh->m_sName = resourceMesh;
+        pMesh->m_sPreviewResource = pEntry->m_sPreviewResource;
+        pMesh->m_uiParts = 1;
+        pMesh->m_bPreview = true;
+      }
       bRebuild = true;
+    }
   }
 
   pMesh->m_uiFileStamp = geometry.m_uiFileStamp;
+  pMesh->m_sSourcePrim = sPrimPath;
+  pMesh->m_uiSourceKey = sourceKey;
 
   // Until the new build is in, the prim shows the mesh's current files.
   if (pMesh->m_uiParts > 0 && ref_state.m_uiAppliedMeshKey != uiMeshKey)
-    ApplyMesh(sPrimPath, ref_state);
+    ApplyMeshUsers(uiMeshKey, pMesh->m_uiParts);
 
   if (bRebuild)
     QueueMesh(uiMeshKey);
@@ -932,25 +1014,63 @@ void plUsdLiveLink::QueueMesh(plUInt64 uiMeshKey)
     return;
 
   ++pMesh->m_uiGeneration;
+  pMesh->m_bComplete = false;
+  pMesh->m_sBuildName.Clear();
+  pMesh->m_uiContentKey = 0;
+  pMesh->m_uiEstimatedPoints = plMath::MaxValue<plUInt64>();
+
+  for (const auto& job : m_Jobs)
+  {
+    if (job->m_uiMeshKey == uiMeshKey)
+    {
+      job->m_Cancelled = true;
+    }
+  }
 
   if (!pMesh->m_bQueued)
   {
     pMesh->m_bQueued = true;
-    m_MeshQueue.PushBack(uiMeshKey);
+    pMesh->m_bPreviewPending = pMesh->m_uiParts == 0;
+    (pMesh->m_bPreviewPending ? m_MeshQueue : m_RefineQueue).PushBack(uiMeshKey);
   }
 }
 
 void plUsdLiveLink::LaunchMeshJobs()
 {
-  // A mesh whose previous build still runs waits for it, so two tasks never write the same files.
-  for (plUInt32 uiChecked = m_MeshQueue.GetCount(); uiChecked > 0 && m_Jobs.GetCount() < GetMaxConcurrentMeshJobs(); --uiChecked)
+  PL_PROFILE_SCOPE("USD admit meshes");
+  PrioritizeMeshes();
+  constexpr plUInt64 MaxPointsInFlight = 4'000'000;
+  const plTime captureDeadline = plTime::Now() + plTime::MakeFromMilliseconds(8);
+  plUInt64 uiPointsInFlight = 0;
+  for (const auto& job : m_Jobs)
   {
-    const plUInt64 uiMeshKey = m_MeshQueue.PeekFront();
-    m_MeshQueue.PopFront();
+    uiPointsInFlight += job->m_uiPointCount;
+  }
+
+  // Preview work has its own queue and gets the next available slot before refinement.
+  const plUInt32 maxJobs = GetMaxConcurrentMeshJobs();
+  for (plUInt32 checked = m_MeshQueue.GetCount() + m_RefineQueue.GetCount(); checked > 0 && m_Jobs.GetCount() < maxJobs; --checked)
+  {
+    if (plTime::Now() >= captureDeadline)
+    {
+      break;
+    }
+
+    const bool previewQueue = !m_MeshQueue.IsEmpty();
+    auto& queue = previewQueue ? m_MeshQueue : m_RefineQueue;
+    if (queue.IsEmpty())
+    {
+      break;
+    }
+
+    const plUInt64 uiMeshKey = queue.PeekFront();
+    queue.PopFront();
 
     Mesh* pMesh = nullptr;
-    if (!m_Meshes.TryGetValue(uiMeshKey, pMesh))
+    if (!m_Meshes.TryGetValue(uiMeshKey, pMesh) || !pMesh->m_bQueued || pMesh->m_bComplete || pMesh->m_bPreviewPending != previewQueue)
+    {
       continue;
+    }
 
     bool bRunning = false;
     for (const plUniquePtr<MeshJob>& pJob : m_Jobs)
@@ -958,81 +1078,304 @@ void plUsdLiveLink::LaunchMeshJobs()
 
     if (bRunning)
     {
-      m_MeshQueue.PushBack(uiMeshKey);
+      queue.PushBack(uiMeshKey);
       continue;
     }
 
-    pMesh->m_bQueued = false;
-
-    // Any prim that needs the mesh has its geometry.
-    plString sSourcePrim;
-    const PrimState* pSourceState = nullptr;
-    for (auto it = m_Prims.GetIterator(); it.IsValid(); ++it)
+    const PrimState* pSourceState = m_Prims.GetValue(pMesh->m_sSourcePrim);
+    if (pSourceState == nullptr || pSourceState->m_uiMeshKey != uiMeshKey)
     {
-      if (it.Value().m_uiMeshKey == uiMeshKey)
+      pSourceState = nullptr;
+      if (const auto* users = m_MeshUsers.GetValue(uiMeshKey))
       {
-        sSourcePrim = it.Key();
-        pSourceState = &it.Value();
-        break;
+        for (const auto& path : *users)
+        {
+          const auto* state = m_Prims.GetValue(path);
+          if (state != nullptr && state->m_uiMeshKey == uiMeshKey)
+          {
+            pMesh->m_sSourcePrim = path;
+            pSourceState = state;
+            break;
+          }
+        }
       }
     }
 
     if (pSourceState == nullptr)
-      continue;
-
-    // Captured now rather than when queued, so the newest geometry is built and nothing is held while it waits.
-    plStatus res;
-    plUniquePtr<plUsdGeometrySource> pSource = m_Stage.CaptureGeometry(sSourcePrim, res);
-    if (pSource == nullptr)
     {
-      plLog::Warning("USD Live: '{}': {}", sSourcePrim, res.m_sMessage);
+      pMesh->m_bQueued = false;
       continue;
     }
 
+    if (pMesh->m_sBuildName.IsEmpty())
+    {
+      if (const auto* known = m_SourceContents.GetValue(pMesh->m_uiSourceKey))
+      {
+        pMesh->m_sBuildName = known->m_sMesh;
+        pMesh->m_uiContentKey = known->m_uiKey;
+        pMesh->m_uiEstimatedPoints = known->m_uiPoints;
+      }
+    }
+
+    // Published files are immutable and the completion marker is replaced atomically. Reusing them
+    // needs no build slot, even while another placement is refining the same geometry.
+    if (!pMesh->m_sBuildName.IsEmpty())
+    {
+      const auto cached = plUsdMeshCache::Read(pMesh->m_sBuildName);
+      if (cached.m_uiParts > 0 || (previewQueue && !cached.m_sPreviewResource.IsEmpty()))
+      {
+        pMesh->m_bQueued = false;
+        AdoptCachedMesh(uiMeshKey, pMesh->m_sBuildName, cached);
+        continue;
+      }
+    }
+
+    // A blocked job retains its cheap estimate and content identity, never a large captured source.
+    if (pMesh->m_uiEstimatedPoints == plMath::MaxValue<plUInt64>())
+    {
+      PL_PROFILE_SCOPE("USD preflight points");
+      pMesh->m_uiEstimatedPoints = m_Stage.GetGeometryPointCount(pMesh->m_sSourcePrim);
+    }
+
+    const plUInt64 uiPoints = pMesh->m_uiEstimatedPoints;
+    if ((!m_Jobs.IsEmpty() && uiPointsInFlight + uiPoints > MaxPointsInFlight) || !plUsdMeshCache::CanAdmit(uiPoints))
+    {
+      queue.PushBack(uiMeshKey);
+      continue;
+    }
+
+    const plTime captureStart = plTime::Now();
+    plUniquePtr<plUsdGeometrySource> source;
+    plStatus res;
+    plUInt64 contentKey = pMesh->m_uiContentKey;
+    if (pMesh->m_sBuildName.IsEmpty())
+    {
+      PL_PROFILE_SCOPE("USD capture and hash");
+      source = m_Stage.CaptureGeometry(pMesh->m_sSourcePrim, res);
+      if (source == nullptr)
+      {
+        pMesh->m_bQueued = false;
+        plLog::Warning("USD Live: '{}': {}", pMesh->m_sSourcePrim, res.m_sMessage);
+        continue;
+      }
+
+      contentKey = plUsdMeshCache::GetKey(source->GetHash(), pSourceState->m_MaterialGroups.GetCount());
+      pMesh->m_sBuildName = plUsdMeshCache::GetMeshName(contentKey);
+      pMesh->m_uiContentKey = contentKey;
+      m_SourceContents[pMesh->m_uiSourceKey] = {pMesh->m_sBuildName, contentKey, uiPoints};
+    }
+
+    // Different source prims and material bindings can resolve to the same immutable geometry.
+    // Acquire before checking the marker: a worker may currently be publishing it.
+    if (!plUsdMeshCache::TryAcquire(pMesh->m_sBuildName, uiPoints))
+    {
+      queue.PushBack(uiMeshKey);
+      continue;
+    }
+
+    const auto cached = plUsdMeshCache::Read(pMesh->m_sBuildName);
+    if (cached.m_uiParts > 0 || (previewQueue && !cached.m_sPreviewResource.IsEmpty()))
+    {
+      plUsdMeshCache::Release(pMesh->m_sBuildName);
+      pMesh->m_bQueued = false;
+      AdoptCachedMesh(uiMeshKey, pMesh->m_sBuildName, cached);
+      continue;
+    }
+
+    if (source == nullptr)
+    {
+      PL_PROFILE_SCOPE("USD capture refinement");
+      source = m_Stage.CaptureGeometry(pMesh->m_sSourcePrim, res);
+    }
+
+    if (source == nullptr)
+    {
+      plUsdMeshCache::Release(pMesh->m_sBuildName);
+      pMesh->m_bQueued = false;
+      plLog::Warning("USD Live: '{}': {}", pMesh->m_sSourcePrim, res.m_sMessage);
+      continue;
+    }
+
+    if (contentKey == 0)
+    {
+      contentKey = plUsdMeshCache::GetKey(source->GetHash(), pSourceState->m_MaterialGroups.GetCount());
+    }
+
     plUniquePtr<MeshJob> pJob = PL_DEFAULT_NEW(MeshJob);
+    pJob->m_bPreviewOnly = previewQueue;
+    pJob->m_uiContentKey = contentKey;
+    pJob->m_CaptureTime = plTime::Now() - captureStart;
+    pJob->m_Started = plTime::Now();
+    pJob->m_sPreviewResource = plUsdMeshCache::GetPreviewResource(pMesh->m_sBuildName);
+    pJob->m_uiPointCount = uiPoints;
     pJob->m_uiMeshKey = uiMeshKey;
     pJob->m_uiGeneration = pMesh->m_uiGeneration;
-    pJob->m_sMesh = pMesh->m_sName;
+    pJob->m_sMesh = pMesh->m_sBuildName;
     pJob->m_uiFileStamp = pMesh->m_uiFileStamp;
-    pJob->m_bTangents = plUsdLiveResources::NeedsTangents(pSourceState->m_MaterialGroups);
+    pJob->m_bTangents = true;
     for (const plUsdMaterialGroup& group : pSourceState->m_MaterialGroups)
-      pJob->m_MaterialResources.PushBack(GetMaterialResource(group));
-    pJob->m_pSource = std::move(pSource);
+      pJob->m_MaterialResources.PushBack(plUsdLiveResources::DefaultMaterial);
+    pJob->m_pSource = std::move(source);
+    pMesh->m_bQueued = false;
 
     // The files are written by the task too, so the main thread never waits for a large write.
     MeshJob* pRaw = pJob.Borrow();
-    plSharedPtr<plDelegateTask<void>> pTask = PL_DEFAULT_NEW(plDelegateTask<void>, "USD Live mesh", plTaskNesting::Never, [pRaw]()
+    plSharedPtr<plDelegateTask<void>> pTask = PL_DEFAULT_NEW(plDelegateTask<void>, previewQueue ? "USD preview" : "USD refinement", plTaskNesting::Never, [pRaw]()
       {
         MeshJob& job = *pRaw;
-        job.m_Result = plUsdLiveResources::BuildMeshParts(*job.m_pSource, job.m_MaterialResources, job.m_uiMeshKey, job.m_bTangents, job.m_Parts);
-        job.m_pSource.Clear();
-
-        if (job.m_Result.Failed())
-          return;
-
-        for (plUInt32 i = 0; i < job.m_Parts.GetCount(); ++i)
+        if (job.m_Cancelled)
         {
-          const plString sResource = plUsdBakeStore::GetMeshResource(job.m_sMesh, i);
-          const bool bExisted = plOSFile::ExistsFile(plUsdBakeStore::ToAbsolutePath(sResource));
+          return;
+        }
 
-          bool bWritten = false;
-          if (plUsdBakeStore::WriteFile(sResource, job.m_Parts[i], &bWritten).Failed())
+        if (job.m_bPreviewOnly)
+        {
+          plGeometry geometry;
+          plDynamicArray<plUInt32> groups;
           {
-            job.m_Result = plStatus(plFmt("could not write '{}'", sResource));
+            PL_PROFILE_SCOPE("USD preview tessellation");
+            job.m_Result = job.m_pSource->Build(geometry, &groups);
+          }
+          job.m_pSource.Clear();
+
+          if (job.m_Result.Failed() || job.m_Cancelled)
+          {
             return;
           }
 
-          job.m_ReplacedParts.PushBack(bExisted && bWritten);
+          plDynamicArray<plUInt8> preview;
+          job.m_Result = plUsdLiveResources::BuildMeshPreview(geometry, groups, job.m_MaterialResources, job.m_uiContentKey, preview);
+          if (job.m_Result.Failed() || job.m_Cancelled)
+          {
+            return;
+          }
+
+          job.m_Result = plStatus(plUsdBakeStore::WriteFile(job.m_sPreviewResource, preview));
+          if (job.m_Result.Succeeded())
+          {
+            job.m_Result = plStatus(plUsdMeshCache::Publish(job.m_sMesh, 0, true));
+          }
+          return;
+        }
+
+        auto publish = [&job](plUInt32 i, plArrayPtr<const plUInt8> bytes) -> plStatus
+        {
+          if (job.m_Cancelled)
+          {
+            return plStatus("Superseded USD geometry.");
+          }
+
+          PL_PROFILE_SCOPE("USD write mesh part");
+          const plString sResource = plUsdBakeStore::GetMeshResource(job.m_sMesh, i);
+          if (plUsdBakeStore::WriteFile(sResource, bytes).Failed())
+          {
+            return plStatus(plFmt("could not write '{}'", sResource));
+          }
+
+          return plStatus(PL_SUCCESS);
+        };
+
+        job.m_Result = plUsdLiveResources::BuildMeshParts(*job.m_pSource, job.m_MaterialResources, job.m_uiContentKey, job.m_bTangents, job.m_Parts, publish,
+          {}, [&job]() { return (bool)job.m_Cancelled; });
+        job.m_pSource.Clear();
+
+        if (job.m_Result.Failed())
+        {
+          return;
         }
 
         job.m_uiPartCount = job.m_Parts.GetCount();
         job.m_Parts.Clear();
         job.m_Parts.Compact();
+        if (!job.m_Cancelled)
+        {
+          job.m_Result = plStatus(plUsdMeshCache::Publish(job.m_sMesh, job.m_uiPartCount, true));
+        }
       });
 
     pJob->m_TaskGroup = plTaskSystem::StartSingleTask(pTask, plTaskPriority::LongRunning);
     m_Jobs.PushBack(std::move(pJob));
+    uiPointsInFlight += uiPoints;
   }
+}
+
+void plUsdLiveLink::PrioritizeMeshes()
+{
+  if (plTime::Now() < m_NextPriorityUpdate || (m_MeshQueue.IsEmpty() && m_RefineQueue.IsEmpty()))
+  {
+    return;
+  }
+
+  m_NextPriorityUpdate = plTime::Now() + plTime::MakeFromMilliseconds(500);
+  const auto* view = plEngineViewWidget::GetInteractionContext().m_pLastHoveredViewWidget;
+  auto* document = plDynamicCast<plGameObjectDocument*>(m_pDocument);
+  if (view == nullptr || document == nullptr || view->GetDocumentWindow()->GetDocument() != m_pDocument)
+  {
+    return;
+  }
+
+  PL_PROFILE_SCOPE("USD prioritize visible geometry");
+  const auto& camera = view->m_pViewConfig->m_Camera;
+  const plVec3 cameraPosition = camera.GetCenterPosition();
+  const plVec3 cameraForward = camera.GetCenterDirForwards();
+  plHashTable<plUInt64, float> scores;
+  for (auto it = m_MeshUsers.GetIterator(); it.IsValid(); ++it)
+  {
+    float score = plMath::MaxValue<float>();
+    for (const auto& path : it.Value())
+    {
+      const auto* state = m_Prims.GetValue(path);
+      if (state == nullptr || state->m_uiMeshKey != it.Key())
+      {
+        continue;
+      }
+
+      const auto* object = m_pDocument->GetObjectManager()->GetObject(state->m_Object);
+      if (object == nullptr)
+      {
+        continue;
+      }
+
+      const plVec3 delta = document->GetGlobalTransform(object).m_vPosition - cameraPosition;
+      float candidate = delta.GetLengthSquared();
+      if (delta.Dot(cameraForward) < 0)
+      {
+        candidate = candidate * 4.0f + 100.0f;
+      }
+      if (!state->m_bVisible || !state->m_bActive || state->m_bPrototype)
+      {
+        candidate += 1.0e12f;
+      }
+      score = plMath::Min(score, candidate);
+    }
+    scores.Insert(it.Key(), score);
+  }
+
+  auto sort = [&](plDeque<plUInt64>& queue)
+  {
+    plDynamicArray<plUInt64> keys;
+    plSet<plUInt64> seen;
+    for (plUInt64 key : queue)
+    {
+      if (!seen.Contains(key))
+      {
+        seen.Insert(key);
+        keys.PushBack(key);
+      }
+    }
+    keys.Sort([&](plUInt64 a, plUInt64 b)
+      {
+        const float sa = scores.Contains(a) ? scores[a] : plMath::MaxValue<float>();
+        const float sb = scores.Contains(b) ? scores[b] : plMath::MaxValue<float>();
+        return sa == sb ? a < b : sa < sb; });
+    queue.Clear();
+    for (plUInt64 key : keys)
+    {
+      queue.PushBack(key);
+    }
+  };
+  sort(m_MeshQueue);
+  sort(m_RefineQueue);
 }
 
 void plUsdLiveLink::FinishMeshJobs(bool bWait)
@@ -1047,9 +1390,8 @@ void plUsdLiveLink::FinishMeshJobs(bool bWait)
       plTaskSystem::WaitForGroup(job.m_TaskGroup);
       RecordMeshJob(job);
     }
-    else if (!plTaskSystem::IsTaskGroupFinished(job.m_TaskGroup) || !IsEngineReady())
+    else if (!plTaskSystem::IsTaskGroupFinished(job.m_TaskGroup))
     {
-      // A finished mesh waits until the engine has the document; an update sent earlier would be dropped.
       ++i;
       continue;
     }
@@ -1058,19 +1400,17 @@ void plUsdLiveLink::FinishMeshJobs(bool bWait)
       ApplyMeshJob(job);
     }
 
+    plUsdMeshCache::Release(job.m_sMesh);
     m_Jobs.RemoveAtAndSwap(i);
   }
 }
 
 bool plUsdLiveLink::RecordMeshJob(const MeshJob& job)
 {
-  Mesh* pMesh = nullptr;
-  if (!m_Meshes.TryGetValue(job.m_uiMeshKey, pMesh))
+  if (job.m_Cancelled)
+  {
     return false;
-
-  // Superseded while it was being built; the newer build is already queued.
-  if (job.m_uiGeneration != pMesh->m_uiGeneration)
-    return false;
+  }
 
   if (job.m_Result.Failed())
   {
@@ -1078,38 +1418,119 @@ bool plUsdLiveLink::RecordMeshJob(const MeshJob& job)
     return false;
   }
 
-  pMesh->m_uiParts = job.m_uiPartCount;
-  m_Manifest.m_Meshes[job.m_sMesh] = {job.m_uiFileStamp, pMesh->m_uiParts};
+  const auto entry = plUsdMeshCache::Read(job.m_sMesh);
+  plUInt32 users = 0;
+  for (auto it = m_Meshes.GetIterator(); it.IsValid(); ++it)
+  {
+    if (it.Value().m_sBuildName == job.m_sMesh)
+    {
+      AdoptCachedMesh(it.Key(), job.m_sMesh, entry);
+      ++users;
+    }
+  }
+
+  plLog::Info("USD Live: {} ready in {} s (capture {} ms, {} points, {} bindings): '{}'",
+    job.m_bPreviewOnly ? "preview" : "refinement", (plTime::Now() - job.m_Started).GetSeconds(), job.m_CaptureTime.GetMilliseconds(),
+    job.m_uiPointCount, users, job.m_sMesh);
   return true;
+}
+
+void plUsdLiveLink::AdoptCachedMesh(plUInt64 uiMeshKey, plStringView sMesh, const plUsdBakeStore::MeshEntry& entry)
+{
+  Mesh* mesh = m_Meshes.GetValue(uiMeshKey);
+  if (mesh == nullptr || (entry.m_uiParts == 0 && entry.m_sPreviewResource.IsEmpty()))
+  {
+    return;
+  }
+
+  mesh->m_sName = sMesh;
+  mesh->m_sPreviewResource = entry.m_sPreviewResource;
+  mesh->m_bComplete = entry.m_uiParts > 0;
+  mesh->m_bPreview = !mesh->m_bComplete;
+  mesh->m_uiParts = mesh->m_bComplete ? entry.m_uiParts : 1;
+  mesh->m_bQueued = false;
+  mesh->m_bPreviewPending = false;
+
+  auto saved = entry;
+  saved.m_uiFileStamp = mesh->m_uiFileStamp;
+  saved.m_sResourceMesh = sMesh;
+  m_Manifest.m_Meshes[mesh->m_sCacheName] = saved;
+  m_bManifestDirty = true;
+
+  if (!mesh->m_bComplete)
+  {
+    mesh->m_bQueued = true;
+    m_RefineQueue.PushBack(uiMeshKey);
+  }
+
+  ApplyMeshUsers(uiMeshKey, mesh->m_uiParts, true);
+}
+
+void plUsdLiveLink::CheckpointMeshCache()
+{
+  if (!m_bManifestLoaded || !m_bManifestDirty)
+  {
+    return;
+  }
+
+  if (plUsdBakeStore::SaveManifest(m_sLinkId, m_Manifest).Succeeded())
+  {
+    m_bManifestDirty = false;
+  }
+  else
+  {
+    plLog::Warning("USD Live: could not checkpoint completed meshes for '{}'.", m_sOpenedFile);
+  }
+
+  m_NextManifestSave = plTime::Now() + plTime::MakeFromSeconds(2);
 }
 
 void plUsdLiveLink::ApplyMeshJob(MeshJob& job)
 {
-  if (!RecordMeshJob(job))
+  RecordMeshJob(job);
+}
+
+void plUsdLiveLink::ApplyMeshUsers(plUInt64 uiMeshKey, plUInt32 uiParts, bool bForce)
+{
+  const auto* users = m_MeshUsers.GetValue(uiMeshKey);
+  if (users == nullptr)
+  {
     return;
-
-  const plUInt32 uiParts = job.m_uiPartCount;
-
-  // New files load from disk once a component names them. Files that replaced older ones may already be loaded in the
-  // engine, which loads them again.
-  for (plUInt32 i = 0; i < uiParts && i < job.m_ReplacedParts.GetCount(); ++i)
-  {
-    if (job.m_ReplacedParts[i])
-      plUsdLiveResources::Reload("Mesh", plUsdBakeStore::GetMeshResource(job.m_sMesh, i));
   }
 
-  // Every prim that needs the mesh. Those already showing it are up to date unless the number of parts changed.
-  plHybridArray<plString, 16> prims;
-  for (auto it = m_Prims.GetIterator(); it.IsValid(); ++it)
+  for (const auto& path : *users)
   {
-    if (it.Value().m_uiMeshKey == job.m_uiMeshKey && (it.Value().m_uiAppliedMeshKey != job.m_uiMeshKey || it.Value().m_uiMeshParts != uiParts))
-      prims.PushBack(it.Key());
+    const auto* state = m_Prims.GetValue(path);
+    if (state != nullptr && state->m_uiMeshKey == uiMeshKey &&
+        (bForce || state->m_uiAppliedMeshKey != uiMeshKey || state->m_uiMeshParts != uiParts) && !m_PendingApplications.Contains(path))
+    {
+      m_PendingApplications.Insert(path);
+      m_ApplyQueue.PushBack(path);
+    }
   }
-
-  for (const plString& sPath : prims)
-    ApplyMesh(sPath, m_Prims[sPath]);
 
   MarkBakeDirty();
+}
+
+void plUsdLiveLink::FlushMeshApplications()
+{
+  if (!IsEngineReady() || m_pDocument->GetCommandHistory()->IsInTransaction() || m_pDocument->GetCommandHistory()->IsInUndoRedo())
+  {
+    return;
+  }
+
+  PL_PROFILE_SCOPE("USD apply mesh objects");
+  const plTime deadline = plTime::Now() + plTime::MakeFromMilliseconds(4);
+  while (!m_ApplyQueue.IsEmpty() && plTime::Now() < deadline)
+  {
+    const plString path = m_ApplyQueue.PeekFront();
+    m_ApplyQueue.PopFront();
+    m_PendingApplications.Remove(path);
+    if (auto* state = m_Prims.GetValue(path))
+    {
+      ApplyMesh(path, *state);
+    }
+  }
 }
 
 void plUsdLiveLink::ApplyMesh(plStringView sPrimPath, PrimState& ref_state)
@@ -1117,6 +1538,12 @@ void plUsdLiveLink::ApplyMesh(plStringView sPrimPath, PrimState& ref_state)
   const Mesh* pMesh = m_Meshes.GetValue(ref_state.m_uiMeshKey);
   if (pMesh == nullptr || pMesh->m_uiParts == 0)
     return;
+
+  // Existing geometry stays visible while an edited mesh is refined. New placements can use its preview.
+  if (pMesh->m_bPreview && ref_state.m_uiAppliedMeshKey != 0 && ref_state.m_uiAppliedMeshKey != ref_state.m_uiMeshKey)
+  {
+    return;
+  }
 
   plObjectDirectAccessor accessor(m_pDocument->GetObjectManager());
   const plDocumentObject* pObject = accessor.GetObject(ref_state.m_Object);
@@ -1148,19 +1575,21 @@ void plUsdLiveLink::ApplyMesh(plStringView sPrimPath, PrimState& ref_state)
       pComponent = accessor.GetObject(componentGuid);
     }
 
-    const plString sResource = plUsdBakeStore::GetMeshResource(pMesh->m_sName, i);
+    const plString sResource = pMesh->m_bPreview ? pMesh->m_sPreviewResource : plUsdBakeStore::GetMeshResource(pMesh->m_sName, i);
     if (pComponent->GetTypeAccessor().GetValue("Mesh").ConvertTo<plString>() != sResource)
       SetProperty(pComponent, "Mesh", sResource);
 
     if (pComponent->GetTypeAccessor().GetValue("Color").ConvertTo<plColor>() != color)
       SetProperty(pComponent, "Color", color);
+
+    plUsdPrimComponents::ApplyMaterials(m_pDocument->GetObjectManager(), pComponent, m_sLinkId, ref_state.m_MaterialGroups);
   }
 
   for (plUInt32 i = uiParts; i < ref_state.m_uiMeshParts; ++i)
   {
     if (const plDocumentObject* pComponent = accessor.GetObject(GetMeshComponentGuid(sPrimPath, i)))
     {
-      accessor.RemoveObject(pComponent).IgnoreResult();
+      plUsdPrimComponents::RemoveObject(m_pDocument->GetObjectManager(), pComponent).IgnoreResult();
     }
   }
 
@@ -1168,7 +1597,10 @@ void plUsdLiveLink::ApplyMesh(plStringView sPrimPath, PrimState& ref_state)
 
   ref_state.m_uiMeshParts = uiParts;
   ref_state.m_uiAppliedMeshKey = ref_state.m_uiMeshKey;
-  m_Manifest.m_Prims[sPrimPath] = {pMesh->m_sName, uiParts};
+  if (!pMesh->m_bPreview)
+  {
+    m_Manifest.m_Prims[sPrimPath] = {pMesh->m_sName, uiParts};
+  }
   MarkBakeDirty();
   MarkInstancersUsing(sPrimPath);
 
@@ -1278,6 +1710,7 @@ void plUsdLiveLink::ApplyInstancer(plStringView sPrimPath)
 
       plUsdPrimComponents::ApplyInstances(m_pDocument->GetObjectManager(), accessor.GetObject(componentGuid), GetMeshResource(*pMesh, uiPart),
         GetTint(*pMesh), mesh.m_Instances.GetArrayPtr().GetSubArray(0, uiCount), sSeed);
+      plUsdPrimComponents::ApplyMaterials(m_pDocument->GetObjectManager(), accessor.GetObject(componentGuid), m_sLinkId, pMesh->m_MaterialGroups);
       components.PushBack(componentGuid);
     }
   }
@@ -1288,7 +1721,7 @@ void plUsdLiveLink::ApplyInstancer(plStringView sPrimPath)
       continue;
 
     if (const plDocumentObject* pComponent = accessor.GetObject(guid))
-      accessor.RemoveObject(pComponent).IgnoreResult();
+      plUsdPrimComponents::RemoveObject(m_pDocument->GetObjectManager(), pComponent).IgnoreResult();
   }
 
   if (!components.IsEmpty())

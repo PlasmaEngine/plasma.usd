@@ -15,6 +15,7 @@
 #include <UsdBridge/UsdRuntime.h>
 #include <UsdBridge/UsdStage.h>
 #include <UsdBridge/UsdTexture.h>
+#include <UsdBridge/UsdTangents.h>
 
 #include <Foundation/Basics/Platform/Win/IncludeWindows.h>
 
@@ -81,6 +82,193 @@ namespace
     return Fail(message.GetText(sTemp));
   }
 
+  bool EqualTangentGeometry(const plGeometry& reference, const plGeometry& actual)
+  {
+    if (reference.GetPolygons().GetCount() != actual.GetPolygons().GetCount())
+    {
+      return false;
+    }
+
+    for (plUInt32 face = 0; face < reference.GetPolygons().GetCount(); ++face)
+    {
+      const auto& a = reference.GetPolygons()[face].m_Vertices;
+      const auto& b = actual.GetPolygons()[face].m_Vertices;
+      if (a.GetCount() != b.GetCount())
+      {
+        return false;
+      }
+
+      for (plUInt32 corner = 0; corner < a.GetCount(); ++corner)
+      {
+        const auto& av = reference.GetVertices()[a[corner]];
+        const auto& bv = actual.GetVertices()[b[corner]];
+        if (av.m_vPosition != bv.m_vPosition || av.m_vNormal != bv.m_vNormal || av.m_vTexCoord != bv.m_vTexCoord ||
+            av.m_Color != bv.m_Color || av.m_BoneIndices != bv.m_BoneIndices || av.m_BoneWeights != bv.m_BoneWeights ||
+            !av.m_vTangent.IsEqual(bv.m_vTangent, 1e-5f) || av.m_fBiTangentSign != bv.m_fBiTangentSign)
+        {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  int TangentRegression()
+  {
+    for (int fixture = 0; fixture < 4; ++fixture)
+    {
+      plGeometry reference;
+      const plVec3 positions[] = {plVec3(0, 0, 0), plVec3(1, 0, 0), plVec3(1, 1, 0), plVec3(0, 1, 0)};
+      const plVec2 uvs[] = {plVec2(0, 0), plVec2(1, 0), plVec2(1, 1), plVec2(0, 1)};
+      for (plUInt32 i = 0; i < 4; ++i)
+      {
+        plVec2 uv = uvs[i];
+        if (fixture == 1)
+        {
+          uv.x = -uv.x;
+        }
+        else if (fixture == 2)
+        {
+          uv.SetZero();
+        }
+
+        reference.AddVertex(positions[i], plVec3(0, 0, 1), uv, plColor(0.2f, 0.4f, 0.6f), plVec4U16(1, 2, 3, 4));
+      }
+
+      plUInt32 quad[] = {0, 1, 2, 3};
+      plUInt32 first[] = {0, 1, 2};
+      plUInt32 second[] = {0, 2, 3};
+      if (fixture == 3)
+      {
+        reference.AddPolygon(quad, false);
+      }
+      else
+      {
+        reference.AddPolygon(first, false);
+        reference.AddPolygon(second, false);
+      }
+
+      plGeometry actual = reference;
+      reference.ComputeTangents();
+      const plStatus result = plUsdTangents::Compute(actual);
+      if (result.Failed() || !EqualTangentGeometry(reference, actual))
+      {
+        return FailFmt(plFmt("Tangent regression {} differs from the engine's MikkTSpace result", fixture));
+      }
+    }
+
+    plLog::Success("Tangent regression passed: triangles, mirrored UVs, degenerate UVs, quads and vertex attributes");
+    return 0;
+  }
+
+  int MeshProfile(plStringView file, plStringView path)
+  {
+    plUsdStage stage;
+    plStatus status = stage.Open(file, plUsdStage::Load::None);
+    if (status.Failed())
+    {
+      return Fail(status.m_sMessage);
+    }
+
+    auto source = stage.CaptureGeometry(path, status);
+    if (!source)
+    {
+      return Fail(status.m_sMessage);
+    }
+
+    plGeometry reference, actual;
+    if (source->Build(reference).Failed() || source->Build(actual).Failed())
+    {
+      return Fail("Could not build benchmark geometry");
+    }
+
+    plLog::Info("Benchmark {}: {} vertices, {} triangles", path, reference.GetVertices().GetCount(), reference.GetPolygons().GetCount());
+    plTime start = plTime::Now();
+    reference.ComputeTangents();
+    const double oldMs = (plTime::Now() - start).GetMilliseconds();
+    start = plTime::Now();
+    status = plUsdTangents::Compute(actual);
+    const double newMs = (plTime::Now() - start).GetMilliseconds();
+    if (status.Failed() || !EqualTangentGeometry(reference, actual))
+    {
+      return Fail("Optimized tangents differ from engine tangents on the benchmark mesh");
+    }
+
+    plLog::Info("Engine tangents {} ms; USD tangents {} ms; matching per-corner results", plArgF(oldMs, 1), plArgF(newMs, 1));
+    return 0;
+  }
+
+  int LightRegression(plStringView sFile)
+  {
+    plUsdStage stage;
+    const plStatus opened = stage.Open(sFile);
+    if (opened.Failed())
+    {
+      return Fail(opened.m_sMessage);
+    }
+
+    if (!stage.IsUnrealAuthored())
+    {
+      return Fail("Unreal light fixture was not recognized");
+    }
+
+    const plVec3d direction = stage.GetBasis().DirectionToPlasma(plVec3d(0, 0, -1));
+    const plVec3 expected((float)direction.x, (float)direction.y, (float)direction.z);
+    plTransform panelTransform = plTransform::MakeIdentity();
+
+    for (const char* path : {"/World/Panel", "/World/Disk", "/World/Camera"})
+    {
+      plUsdPrim prim;
+      if (stage.ReadPrim(path, prim).Failed())
+      {
+        return FailFmt(plFmt("missing regression prim {}", path));
+      }
+
+      const bool area = prim.m_Kind == plUsdPrimKind::Light;
+      const plVec3 forward = prim.m_LocalTransform.m_qRotation * plVec3(area ? -1.0f : 1.0f, 0, 0);
+      if (!forward.IsEqual(expected, 1e-5f))
+      {
+        return FailFmt(plFmt("incorrect emission/view direction for {}", path));
+      }
+
+      if (plStringView(path) == "/World/Panel")
+      {
+        panelTransform = prim.m_LocalTransform;
+        const float lumens = prim.m_Light.m_fLuminance * prim.m_Light.GetUnrealLumensPerNit();
+        if (plMath::Abs(lumens - 4.0f * plMath::Pi<float>()) > 1e-4f)
+        {
+          return Fail("2 nits over a 2 m^2 blue rectangle must import as 12.56637 lumens");
+        }
+      }
+    }
+
+    plUsdPrim marker;
+    if (stage.ReadPrim("/World/Panel/Marker", marker).Failed() ||
+        !panelTransform.TransformPosition(marker.m_LocalTransform.m_vPosition).IsEqual(expected, 1e-5f))
+    {
+      return Fail("area-light correction moved its child");
+    }
+
+    plUsdPrim point;
+    if (stage.ReadPrim("/World/Point", point).Failed() ||
+        plMath::Abs(point.m_Light.GetUnrealLumensPerNit() - 4.0f * plMath::Pi<float>() * 0.0001f) > 1e-6f)
+    {
+      return Fail("zero-radius Unreal point light lost its clamped emitting area");
+    }
+
+    plUsdPrim spot;
+    const float solidAngle = 2.0f * plMath::Pi<float>() * (1.0f - plMath::Cos(plAngle::MakeFromDegree(30)));
+    if (stage.ReadPrim("/World/Spot", spot).Failed() ||
+        plMath::Abs(spot.m_Light.GetUnrealLumensPerNit() - solidAngle * solidAngle * 0.25f) > 1e-5f)
+    {
+      return Fail("Unreal spotlight power must use its cone solid angle and source radius");
+    }
+
+    plLog::Success("Light regression passed: area emission, child transforms, lumens, point radius and spot cone");
+    return 0;
+  }
+
   /// Times each step a live link's first sync takes on the editor's main thread, then the mesh builds its worker tasks
   /// run, so a slow stage shows where the time goes. Builds at most uiMaxBuilds distinct meshes.
   int Profile(plStringView sFile, plUInt32 uiMaxBuilds, bool bTangents)
@@ -136,9 +324,14 @@ namespace
     }
     lap("CaptureGeometry, one prim per distinct geometry");
 
+    plUInt64 uiCapturedPoints = 0;
     for (const plUniquePtr<plUsdGeometrySource>& pSource : sources)
+    {
+      uiCapturedPoints += pSource->GetPointCount();
       hashes.Insert(pSource->GetHash());
+    }
     lap(plFmt("GetHash of those ({} distinct contents)", hashes.GetCount()));
+    plLog::Info("Captured {} points across {} geometries", uiCapturedPoints, sources.GetCount());
 
     plUInt64 uiVertices = 0;
     plUInt64 uiTriangles = 0;
@@ -342,8 +535,8 @@ namespace
       }
 
       {
-        // Where a Plasma component on this object looks: its +X.
-        const plVec3 vLook = prim.m_LocalTransform.m_qRotation * plVec3(1, 0, 0);
+        const bool bArea = prim.m_Light.m_Shape == plUsdLightShape::Rect || prim.m_Light.m_Shape == plUsdLightShape::Disk;
+        const plVec3 vLook = prim.m_LocalTransform.m_qRotation * plVec3(bArea ? -1.0f : 1.0f, 0, 0);
 
         plStringBuilder sView;
 
@@ -355,6 +548,10 @@ namespace
             l.m_bNormalize ? " normalized" : "", plArgF(l.m_Color.r, 2), plArgF(l.m_Color.g, 2), plArgF(l.m_Color.b, 2));
           sView.AppendFormat(" radius {} size {} x {} length {}", plArgF(l.m_fRadius, 3), plArgF(l.m_fWidth, 3), plArgF(l.m_fHeight, 3), plArgF(l.m_fLength, 3));
           sView.AppendFormat(" cone {} deg softness {} shadows {}", plArgF(l.m_ConeAngle.GetDegree(), 1), plArgF(l.m_fConeSoftness, 2), l.m_bCastShadows);
+          if (l.m_bUnrealUnits && !l.m_bNormalize && l.m_Shape != plUsdLightShape::Distant && l.m_Shape != plUsdLightShape::Other && l.m_Shape != plUsdLightShape::Cylinder)
+          {
+            sView.AppendFormat(" Unreal power {} lm", plArgF(l.m_fLuminance * l.GetUnrealLumensPerNit(), 4));
+          }
         }
         else if (prim.m_Kind == plUsdPrimKind::Camera)
         {
@@ -1677,7 +1874,11 @@ int main(int argc, const char** argv)
       plLog::Success("Basis self-test passed");
   }
 
-  if (iResult == 0 && argc >= 3 && plStringView(argv[1]) == "--texture")
+  if (iResult == 0 && argc >= 2 && plStringView(argv[1]) == "--tangent-test")
+  {
+    iResult = TangentRegression();
+  }
+  else if (iResult == 0 && argc >= 3 && plStringView(argv[1]) == "--texture")
   {
     // plUsdInspect --texture <output.dds> <colour file> [opacity file]
     const plStringView sOpacity = argc >= 5 ? plStringView(argv[4]) : plStringView();
@@ -1706,6 +1907,14 @@ int main(int argc, const char** argv)
     else if (argc >= 3 && plStringView(argv[2]) == "--values-roundtrip")
     {
       iResult = ValuesRoundTrip(sFile);
+    }
+    else if (argc >= 4 && plStringView(argv[2]) == "--mesh-profile")
+    {
+      iResult = MeshProfile(sFile, argv[3]);
+    }
+    else if (argc >= 3 && plStringView(argv[2]) == "--light-test")
+    {
+      iResult = LightRegression(sFile);
     }
     else if (argc >= 3 && plStringView(argv[2]) == "--profile")
     {

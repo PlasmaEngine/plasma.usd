@@ -12,7 +12,7 @@
 namespace
 {
   /// Changes whenever the plan file layout or what a plan holds changes, so older plans are scanned again.
-  constexpr plUInt32 PlanFileVersion = 4;
+  constexpr plUInt32 PlanFileVersion = 5;
 
   /// Changes whenever what the import writes changes, so older plans and meshes are made again.
   constexpr plUInt64 ImportVersion = 2;

@@ -2,6 +2,7 @@
 
 #include <EditorPluginUsd/EditorPluginUsdDLL.h>
 #include <Foundation/Containers/DynamicArray.h>
+#include <Foundation/Types/Delegate.h>
 #include <Foundation/Types/Status.h>
 #include <UsdBridge/UsdStage.h>
 
@@ -14,6 +15,14 @@
 class PL_EDITORPLUGINUSD_DLL plUsdLiveResources
 {
 public:
+  /// Called on the build thread after each complete part. The bytes are released after the callback returns.
+  using PartReady = plDelegate<plStatus(plUInt32, plArrayPtr<const plUInt8>)>;
+  using Cancelled = plDelegate<bool()>;
+
+  /// Builds a temporary, material-separated coarse mesh without tangent or meshlet-LOD generation.
+  static plStatus BuildMeshPreview(const plGeometry& geometry, plArrayPtr<const plUInt32> groupTriangles,
+    plArrayPtr<const plString> materialResources, plUInt64 uiContentHash, plDynamicArray<plUInt8>& out_data);
+
   /// \brief The most vertices in one mesh part. Each part is its own file and resource, culled on its own, and keeps the
   /// memory one build and one engine load need bounded.
   static constexpr plUInt32 MaxVerticesPerPart = 250000;
@@ -41,12 +50,12 @@ public:
   /// every part is group i. Without bTangents each vertex gets an arbitrary tangent perpendicular to its normal, which
   /// takes a fraction of the time MikkTSpace does on a large mesh and is all a material without a normal map needs.
   static plStatus BuildMeshParts(const plUsdGeometrySource& source, plArrayPtr<const plString> materialResources, plUInt64 uiContentHash,
-    bool bTangents, plDynamicArray<plDynamicArray<plUInt8>>& out_parts);
+    bool bTangents, plDynamicArray<plDynamicArray<plUInt8>>& out_parts, PartReady onPart = {}, PartReady onPreview = {}, Cancelled cancelled = {});
 
   /// \brief BuildMeshParts for geometry already built: triangles ordered by material group, groupTriangles counting
   /// each group's triangles. Writes the geometry's tangents.
   static plStatus BuildMeshPartsFromGeometry(plGeometry& geom, plArrayPtr<const plUInt32> groupTriangles, plArrayPtr<const plString> materialResources,
-    plUInt64 uiContentHash, bool bTangents, plDynamicArray<plDynamicArray<plUInt8>>& out_parts);
+    plUInt64 uiContentHash, bool bTangents, plDynamicArray<plDynamicArray<plUInt8>>& out_parts, PartReady onPart = {}, Cancelled cancelled = {});
 
   /// \brief Serialises a material that derives from DefaultMaterial and overrides colour, metallic, roughness and
   /// textures from the surface. The surface's texture paths must already be ones the engine can open; an opacity mask

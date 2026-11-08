@@ -107,6 +107,11 @@ plUInt64 plUsdBakePrefab::GetContentHash(plArrayPtr<const plUsdBakeNode> nodes, 
       const plColor tint = plUsdBakeStore::GetTint(prim.m_MaterialGroups);
       add(tint);
       addString(node.m_sMesh);
+      for (const auto& group : prim.m_MaterialGroups)
+      {
+        addString(group.m_Surface.m_sMaterialPath);
+        add(group.m_Surface.m_bDoubleSided);
+      }
     }
 
     if (prim.m_Kind == plUsdPrimKind::Light)
@@ -167,6 +172,8 @@ plStatus plUsdBakePrefab::Write(plStringView sPrefabPath, plStringView sLinkId, 
 
   // Rebuilt from scratch each time. The GUIDs come from the prim paths, so they are the same in every bake.
   {
+    pDocument->GetCommandHistory()->ClearUndoHistory();
+    pDocument->GetCommandHistory()->ClearRedoHistory();
     plHybridArray<const plDocumentObject*, 64> previous;
     for (const plDocumentObject* pChild : pManager->GetRootObject()->GetChildren())
     {
@@ -175,7 +182,7 @@ plStatus plUsdBakePrefab::Write(plStringView sPrefabPath, plStringView sLinkId, 
     }
 
     for (const plDocumentObject* pChild : previous)
-      accessor.RemoveObject(pChild).IgnoreResult();
+      plUsdPrimComponents::RemoveObject(pManager, pChild).IgnoreResult();
   }
 
   const plRTTI* pGameObjectType = plGetStaticRTTI<plGameObject>();
@@ -224,6 +231,7 @@ plStatus plUsdBakePrefab::Write(plStringView sPrefabPath, plStringView sLinkId, 
           const plDocumentObject* pComponent = accessor.GetObject(componentGuid);
           set(pComponent, "Mesh", plUsdBakeStore::GetMeshResource(node.m_sMesh, i));
           set(pComponent, "Color", tint);
+          plUsdPrimComponents::ApplyMaterials(pManager, pComponent, sLinkId, prim.m_MaterialGroups);
         }
       }
     }
@@ -258,6 +266,7 @@ plStatus plUsdBakePrefab::Write(plStringView sPrefabPath, plStringView sLinkId, 
           plUsdPrimComponents::ApplyInstances(pManager, accessor.GetObject(componentGuid), plUsdBakeStore::GetMeshResource(pMeshNode->m_sMesh, uiPart),
             plUsdBakeStore::GetTint(pMeshNode->m_Prim.m_MaterialGroups), mesh.m_Instances.GetArrayPtr().GetSubArray(0, uiCount), sSeed);
           bInstanced = true;
+          plUsdPrimComponents::ApplyMaterials(pManager, accessor.GetObject(componentGuid), sLinkId, pMeshNode->m_Prim.m_MaterialGroups);
         }
       }
     }

@@ -1,0 +1,46 @@
+#usda 1.0
+(
+    metersPerUnit = 0.01
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def RectLight "Rect"
+    {
+        custom float inputs:attenuationRadius = 1200
+    }
+
+    def SphereLight "Point"
+    {
+        float inputs:radius = 5
+        custom double unreal:attenuationRadius = 800
+    }
+
+    def SphereLight "Spot" (prepend apiSchemas = ["ShapingAPI"])
+    {
+        float inputs:shaping:cone:angle = 30
+        custom float inputs:range = 600
+    }
+
+    def DiskLight "Disk"
+    {
+        custom float plasma:light:range = 400
+        custom float inputs:range = 900
+    }
+
+    def CylinderLight "Cylinder"
+    {
+        custom float inputs:attenuationRadius = 300
+    }
+
+    def SphereLight "EmitterOnly"
+    {
+        float inputs:radius = 75
+    }
+
+    def RectLight "InvalidRange"
+    {
+        custom float inputs:range = -10
+    }
+}

@@ -36,6 +36,8 @@ namespace
   const char* s_szLights = "Upi.Lights";
   const char* s_szSkipGuides = "Upi.SkipGuides";
   const char* s_szRegion = "Upi.Region";
+  const char* s_szSelectAll = "Upi.Prims.SelectAll";
+  const char* s_szSelectAllText = "Upi.Prims.SelectAll.Text";
   const char* s_szVariantPrefix = "Upi.Variant.";
   const char* s_szNumberSubmit = "Upi.Number.Submit";
 
@@ -735,9 +737,12 @@ void plUsdPartitionImportEngineDlg::UpdateState()
   const bool bScanning = IsScanning();
   const bool bImportRunning = IsImportRunning();
 
+  plEditorUi::WriteEnabled(GetSurface()->GetBlackboard(), s_szSelectAll, bRead && m_bTreeFilled && !bScanning && !bImportRunning && m_pTree->GetItemCount() > 0);
+
   if (m_bOptionsDirty)
   {
     m_bOptionsDirty = false;
+    WriteText(s_szSelectAllText, m_pTree->AreAllChecked() ? "Select none" : "Select all");
 
     plUsdPartitionImportOptions options;
     plString sError;
@@ -1032,6 +1037,19 @@ void plUsdPartitionImportEngineDlg::BuildBody(plUiElement* pBody, const plVec2& 
   const float fTreeHeight = plMath::Max(vSize.y - y - s_fSectionPitch - fBelow, s_fMinTreeHeight);
 
   Section(pBody, y, fWidth, "Prims");
+  const float fSelectAllWidth = plMath::Max(PushButtonWidth("Select all"), PushButtonWidth("Select none"));
+  plBlackboard& board = GetSurface()->GetBlackboard();
+  WriteText(s_szSelectAllText, m_pTree->AreAllChecked() ? "Select none" : "Select all");
+  plUiButton* pSelectAll = PushButton(pBody, board, plRectFloat(x + fWidth - fSelectAllWidth, y, fSelectAllWidth, SectionHeaderHeight), "Select all", s_szSelectAll,
+    IsRead() && m_bTreeFilled && !IsScanning() && !IsImportRunning() && m_pTree->GetItemCount() > 0);
+  for (plUiElement* pChild : pSelectAll->m_Children)
+  {
+    if (plUiText* pText = plDynamicCast<plUiText*>(pChild))
+    {
+      pText->m_sTextBinding = s_szSelectAllText;
+    }
+  }
+  SetToolTip(board, s_szSelectAll, "Check every importable prim, or clear all checks when all are checked, including collapsed branches.");
   y += s_fSectionPitch;
 
   m_TreeRect = plRectFloat(x, y, fWidth, fTreeHeight);
@@ -1239,6 +1257,14 @@ void plUsdPartitionImportEngineDlg::OnUiEvent(const plMsgUiEvent& event)
   else if (sId == s_szBrowse)
   {
     Browse();
+  }
+  else if (sId == s_szSelectAll)
+  {
+    if (IsRead() && m_bTreeFilled && !IsScanning() && !IsImportRunning())
+    {
+      m_pTree->SetAllChecked(!m_pTree->AreAllChecked());
+      OnChecksChanged(plInvalidIndex);
+    }
   }
   else if (sId == s_szCellSize)
   {

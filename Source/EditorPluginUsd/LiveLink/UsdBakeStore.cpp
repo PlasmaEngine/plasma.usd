@@ -134,8 +134,10 @@ void plUsdBakeStore::RemoveUnusedMeshes(plStringView sLinkId, Manifest& inout_ma
   plHybridArray<plString, 16> unused;
   for (auto it = inout_manifest.m_Meshes.GetIterator(); it.IsValid(); ++it)
   {
-    if (!used.Contains(it.Key()))
+    if (!used.Contains(it.Value().m_sResourceMesh.IsEmpty() ? it.Key() : it.Value().m_sResourceMesh))
+    {
       unused.PushBack(it.Key());
+    }
   }
   for (const plString& sMesh : unused)
     inout_manifest.m_Meshes.Remove(sMesh);
@@ -144,7 +146,7 @@ void plUsdBakeStore::RemoveUnusedMeshes(plStringView sLinkId, Manifest& inout_ma
   plSet<plString> keep;
   for (auto it = inout_manifest.m_Meshes.GetIterator(); it.IsValid(); ++it)
   {
-    plStringBuilder s = ToAbsolutePath(it.Key());
+    plStringBuilder s = ToAbsolutePath(it.Value().m_sResourceMesh.IsEmpty() ? it.Key() : it.Value().m_sResourceMesh);
     s.MakeCleanPath();
     keep.Insert(s);
   }
@@ -256,13 +258,24 @@ plResult plUsdBakeStore::WriteAbsoluteFile(plStringView sFile, plArrayPtr<const 
 
 void plUsdBakeStore::LoadManifest(plStringView sLinkId, Manifest& out_manifest)
 {
+  LoadManifestFile(plStringBuilder(GetLinkFolder(sLinkId), "/bake.json"), out_manifest);
+}
+
+void plUsdBakeStore::LoadManifestFile(plStringView sFile, Manifest& out_manifest)
+{
   out_manifest = {};
 
   plVariantDictionary root;
-  if (!plUsdJson::ReadFile(plStringBuilder(GetLinkFolder(sLinkId), "/bake.json"), root))
+  if (!plUsdJson::ReadFile(sFile, root))
+  {
     return;
+  }
 
-  out_manifest.m_Prefab = plConversionUtils::ConvertStringToUuid(plUsdJson::GetString(root, "prefab"));
+  const plString sPrefab = plUsdJson::GetString(root, "prefab");
+  if (plConversionUtils::IsStringUuid(sPrefab))
+  {
+    out_manifest.m_Prefab = plConversionUtils::ConvertStringToUuid(sPrefab);
+  }
   out_manifest.m_uiContentHash = plUsdJson::ParseHex(plUsdJson::GetString(root, "content"));
 
   // Version 1 named mesh files by prim; its meshes are simply built again.
@@ -283,6 +296,13 @@ void plUsdBakeStore::LoadManifest(plStringView sLinkId, Manifest& out_manifest)
       MeshEntry entry;
       entry.m_uiFileStamp = plUsdJson::ParseHex(plUsdJson::GetString(mesh, "files"));
       entry.m_uiParts = static_cast<plUInt32>(plUsdJson::GetNumber(mesh, "parts"));
+      entry.m_sResourceMesh = plUsdJson::GetString(mesh, "resourceMesh");
+      entry.m_sPreviewResource = plUsdJson::GetString(mesh, "preview");
+      entry.m_uiPreviewSize = plUsdJson::ParseHex(plUsdJson::GetString(mesh, "previewSize"));
+      for (const auto& size : plUsdJson::GetArray(mesh, "partSizes"))
+      {
+        entry.m_PartSizes.PushBack(plUsdJson::ParseHex(plUsdJson::AsString(size)));
+      }
       out_manifest.m_Meshes.Insert(it.Key(), entry);
     }
   }
@@ -294,6 +314,11 @@ void plUsdBakeStore::LoadManifest(plStringView sLinkId, Manifest& out_manifest)
 }
 
 plResult plUsdBakeStore::SaveManifest(plStringView sLinkId, const Manifest& manifest)
+{
+  return SaveManifestFile(plStringBuilder(GetLinkFolder(sLinkId), "/bake.json"), manifest);
+}
+
+plResult plUsdBakeStore::SaveManifestFile(plStringView sFile, const Manifest& manifest)
 {
   plVariantDictionary prims;
   for (auto it = manifest.m_Prims.GetIterator(); it.IsValid(); ++it)
@@ -310,6 +335,15 @@ plResult plUsdBakeStore::SaveManifest(plStringView sLinkId, const Manifest& mani
     plVariantDictionary mesh;
     mesh.Insert("files", plUsdJson::HexString(it.Value().m_uiFileStamp));
     mesh.Insert("parts", static_cast<plInt32>(it.Value().m_uiParts));
+    mesh.Insert("resourceMesh", it.Value().m_sResourceMesh);
+    mesh.Insert("preview", it.Value().m_sPreviewResource);
+    mesh.Insert("previewSize", plUsdJson::HexString(it.Value().m_uiPreviewSize));
+    plVariantArray sizes;
+    for (plUInt64 size : it.Value().m_PartSizes)
+    {
+      sizes.PushBack(plUsdJson::HexString(size));
+    }
+    mesh.Insert("partSizes", sizes);
     meshes.Insert(it.Key(), mesh);
   }
 
@@ -325,17 +359,19 @@ plResult plUsdBakeStore::SaveManifest(plStringView sLinkId, const Manifest& mani
     plConversionUtils::ToString(manifest.m_Prefab, sPrefab);
 
   plVariantDictionary root;
-  root.Insert("version", 2);
+  root.Insert("version", 3);
   root.Insert("prefab", plString(sPrefab));
   root.Insert("content", plUsdJson::HexString(manifest.m_uiContentHash));
   root.Insert("prims", prims);
   root.Insert("meshes", meshes);
   root.Insert("layers", layers);
 
-  const plString sFolder = GetLinkFolder(sLinkId);
-  PL_SUCCEED_OR_RETURN(plOSFile::CreateDirectoryStructure(sFolder));
+  PL_SUCCEED_OR_RETURN(plOSFile::CreateDirectoryStructure(sFile.GetFileDirectory()));
 
-  return plUsdJson::WriteFile(plStringBuilder(sFolder, "/bake.json"), root);
+  const plString json = plUsdJson::Write(root, true);
+  return WriteAbsoluteFile(sFile,
+    plArrayPtr<const plUInt8>(reinterpret_cast<const plUInt8*>(json.GetData()), json.GetElementCount()), nullptr,
+    plStringBuilder(sFile, ".tmp"));
 }
 
 bool plUsdBakeStore::RecordLayers(const plUsdStage& stage, plHashTable<plString, plInt64>& out_layers, plInt64 iSince)

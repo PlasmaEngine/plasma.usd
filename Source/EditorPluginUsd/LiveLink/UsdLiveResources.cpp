@@ -6,9 +6,12 @@
 #include <EditorPluginUsd/LiveLink/UsdLiveResources.h>
 #include <Foundation/Algorithm/HashingUtils.h>
 #include <Foundation/IO/MemoryStream.h>
+#include <Foundation/Profiling/Profiling.h>
 #include <Foundation/Utilities/AssetFileHeader.h>
 #include <ModelImporter2/MeshletLodGenerator.h>
 #include <RendererCore/Meshes/MeshResourceDescriptor.h>
+#include <UsdBridge/UsdTangents.h>
+#include <meshoptimizer/meshoptimizer.h>
 
 namespace
 {
@@ -30,8 +33,9 @@ namespace
   };
 
   void SerializeMesh(const plGeometry& geom, plArrayPtr<const plString> materials, plArrayPtr<const SubMeshRange> subMeshes, plUInt64 uiHash,
-    bool bHighPrecision, plDynamicArray<plUInt8>& out_data)
+    bool bHighPrecision, plDynamicArray<plUInt8>& out_data, bool bPreview = false, const plBoundingBoxSphere* pBounds = nullptr)
   {
+    PL_PROFILE_SCOPE("USD serialize mesh");
     plMeshResourceDescriptor desc;
 
     // Every part carries every slot, so slot i is group i in all of them.
@@ -40,24 +44,41 @@ namespace
 
     plMeshBufferResourceDescriptor& buffer = desc.MeshBufferDesc();
     buffer.AddCommonStreams(bHighPrecision);
-    buffer.AllocateStreamsFromGeometry(geom, plGALPrimitiveTopology::Triangles);
+    {
+      PL_PROFILE_SCOPE("USD vertex streams");
+      buffer.AllocateStreamsFromGeometry(geom, plGALPrimitiveTopology::Triangles);
+    }
 
     for (const SubMeshRange& subMesh : subMeshes)
       desc.AddSubMesh(subMesh.m_uiTriangles, subMesh.m_uiFirstTriangle, subMesh.m_uiMaterial);
 
     desc.ComputeBounds();
+    if (pBounds != nullptr)
+    {
+      desc.SetBounds(*pBounds);
+    }
 
     // Meshlets with a LOD hierarchy, as mesh assets with virtual geometry get: the GPU culling picks a cut per instance,
     // so a distant copy of a million-triangle mesh draws a handful of clusters. A mesh too small for a hierarchy keeps
     // the classic whole-sub-mesh draw (Rendering.Culling.GPU.Meshlets.RequireLod).
-    if (plModelImporter2::GenerateMeshletLods(desc).Failed())
-      desc.ClearMeshlets();
+    if (!bPreview)
+    {
+      PL_PROFILE_SCOPE("USD meshlet LODs");
+      if (plModelImporter2::GenerateMeshletLods(desc).Failed())
+      {
+        desc.ClearMeshlets();
+      }
+    }
 
     // A coarse proxy ahead of the full mesh: the engine shows it first and loads the full mesh only where a view needs
     // the detail (plMeshStreaming), so a scene of dense meshes neither waits for nor fills GPU memory with all of them.
     plMeshResourceDescriptor proxy;
     float fProxyLodError = 0.0f;
-    const bool bProxy = !desc.GetMeshlets().IsEmpty() && plModelImporter2::GenerateMeshletProxy(desc, plUsdLiveResources::ProxyTriangleRatio, proxy, fProxyLodError).Succeeded();
+    bool bProxy = false;
+    {
+      PL_PROFILE_SCOPE("USD meshlet proxy");
+      bProxy = !desc.GetMeshlets().IsEmpty() && plModelImporter2::GenerateMeshletProxy(desc, plUsdLiveResources::ProxyTriangleRatio, proxy, fProxyLodError).Succeeded();
+    }
 
     plContiguousMemoryStreamStorage storage;
     plMemoryStreamWriter writer(&storage);
@@ -98,21 +119,150 @@ bool plUsdLiveResources::NeedsTangents(plArrayPtr<const plUsdMaterialGroup> grou
 }
 
 plStatus plUsdLiveResources::BuildMeshParts(const plUsdGeometrySource& source, plArrayPtr<const plString> materialResources, plUInt64 uiContentHash,
-  bool bTangents, plDynamicArray<plDynamicArray<plUInt8>>& out_parts)
+  bool bTangents, plDynamicArray<plDynamicArray<plUInt8>>& out_parts, PartReady onPart, PartReady onPreview, Cancelled cancelled)
 {
   out_parts.Clear();
 
   plGeometry geom;
   plDynamicArray<plUInt32> groupTriangles;
-  const plStatus res = source.Build(geom, &groupTriangles);
+  if (cancelled.IsValid() && cancelled())
+  {
+    return plStatus("Superseded USD geometry.");
+  }
+
+  plStatus res;
+  {
+    PL_PROFILE_SCOPE("USD tessellation");
+    res = source.Build(geom, &groupTriangles);
+  }
   if (res.Failed())
     return res;
 
-  return BuildMeshPartsFromGeometry(geom, groupTriangles, materialResources, uiContentHash, bTangents, out_parts);
+  if (cancelled.IsValid() && cancelled())
+  {
+    return plStatus("Superseded USD geometry.");
+  }
+
+  if (onPreview.IsValid() && geom.GetPolygons().GetCount() > 32000)
+  {
+    plDynamicArray<plUInt8> preview;
+    if (BuildMeshPreview(geom, groupTriangles, materialResources, uiContentHash, preview).Succeeded())
+    {
+      onPreview(0, preview).LogFailure();
+    }
+  }
+
+  return BuildMeshPartsFromGeometry(geom, groupTriangles, materialResources, uiContentHash, bTangents, out_parts, onPart, cancelled);
+}
+
+plStatus plUsdLiveResources::BuildMeshPreview(const plGeometry& geometry, plArrayPtr<const plUInt32> groupTriangles,
+  plArrayPtr<const plString> materialResources, plUInt64 uiContentHash, plDynamicArray<plUInt8>& out_data)
+{
+  PL_PROFILE_SCOPE("USD simplify preview");
+  out_data.Clear();
+  if (groupTriangles.GetCount() != materialResources.GetCount() || geometry.GetPolygons().IsEmpty() || geometry.GetVertices().IsEmpty())
+  {
+    return plStatus("Invalid geometry for a USD preview.");
+  }
+
+  constexpr plUInt32 TargetTriangles = 32000;
+  const auto& vertices = geometry.GetVertices();
+  const auto& polygons = geometry.GetPolygons();
+  plDynamicArray<plVec3> positions;
+  positions.SetCountUninitialized(vertices.GetCount());
+  plBoundingBox bounds = plBoundingBox::MakeInvalid();
+  for (plUInt32 i = 0; i < vertices.GetCount(); ++i)
+  {
+    positions[i] = vertices[i].m_vPosition;
+    bounds.ExpandToInclude(positions[i]);
+  }
+
+  plGeometry preview;
+  plDynamicArray<plUInt32> remap;
+  remap.SetCount(vertices.GetCount(), plInvalidIndex);
+  plDynamicArray<plUInt32> indices, simplified;
+  plHybridArray<SubMeshRange, 8> subMeshes;
+  plUInt32 firstFace = 0;
+
+  for (plUInt32 group = 0; group < groupTriangles.GetCount(); ++group)
+  {
+    const plUInt32 faces = groupTriangles[group];
+    if (faces == 0)
+    {
+      continue;
+    }
+
+    if (firstFace + faces > polygons.GetCount())
+    {
+      return plStatus("Invalid material ranges for a USD preview.");
+    }
+
+    indices.Clear();
+    indices.Reserve(faces * 3);
+    for (plUInt32 i = 0; i < faces; ++i)
+    {
+      const auto& triangle = polygons[firstFace + i].m_Vertices;
+      if (triangle.GetCount() != 3)
+      {
+        return plStatus("USD previews require triangulated geometry.");
+      }
+
+      indices.PushBackRange(triangle);
+    }
+    firstFace += faces;
+
+    simplified.SetCountUninitialized(indices.GetCount());
+    const plUInt32 target = plMath::Max<plUInt32>(1, (plUInt32)((plUInt64)TargetTriangles * faces / polygons.GetCount()));
+    plUInt32 count = indices.GetCount();
+    if (polygons.GetCount() <= TargetTriangles)
+    {
+      plMemoryUtils::Copy(simplified.GetData(), indices.GetData(), count);
+    }
+    else
+    {
+      // A preview must cover the same surfaces as the source. Vertex clustering can erase thin pieces and
+      // disconnected triangles, making the mesh look stippled. Keep open edges and material boundaries fixed;
+      // reaching the triangle target is optional when topology prevents a safe reduction.
+      count = (plUInt32)meshopt_simplify(simplified.GetData(), indices.GetData(), indices.GetCount(),
+        positions[0].GetData(), positions.GetCount(), sizeof(plVec3), plMath::Min(target * 3, indices.GetCount()), 0.01f, meshopt_SimplifyLockBorder, nullptr);
+    }
+    if (count == 0)
+    {
+      // Keeping just one triangle would turn an unsimplifiable material group into holes.
+      count = indices.GetCount();
+      plMemoryUtils::Copy(simplified.GetData(), indices.GetData(), count);
+    }
+
+    subMeshes.PushBack({group, preview.GetPolygons().GetCount(), count / 3});
+    for (plUInt32 i = 0; i < count; i += 3)
+    {
+      plUInt32 triangle[3];
+      for (plUInt32 corner = 0; corner < 3; ++corner)
+      {
+        const plUInt32 source = simplified[i + corner];
+        if (remap[source] == plInvalidIndex)
+        {
+          auto vertex = vertices[source];
+          vertex.m_vTangent = vertex.m_vNormal.GetOrthogonalVector().GetNormalized();
+          vertex.m_fBiTangentSign = 1.0f;
+          remap[source] = preview.GetVertices().GetCount();
+          preview.GetVertices().PushBack(vertex);
+        }
+
+        triangle[corner] = remap[source];
+      }
+
+      preview.AddPolygon(triangle, false);
+    }
+  }
+
+  const auto fullBounds = plBoundingBoxSphere::MakeFromBox(bounds);
+  SerializeMesh(preview, materialResources, subMeshes, uiContentHash, NeedsHighPrecision(preview), out_data, true, &fullBounds);
+  return plStatus(PL_SUCCESS);
 }
 
 plStatus plUsdLiveResources::BuildMeshPartsFromGeometry(plGeometry& geom, plArrayPtr<const plUInt32> groupTriangles, plArrayPtr<const plString> materialResources,
-  plUInt64 uiContentHash, bool bTangents, plDynamicArray<plDynamicArray<plUInt8>>& out_parts)
+  plUInt64 uiContentHash, bool bTangents, plDynamicArray<plDynamicArray<plUInt8>>& out_parts, PartReady onPart, Cancelled cancelled)
 {
   out_parts.Clear();
 
@@ -124,7 +274,8 @@ plStatus plUsdLiveResources::BuildMeshPartsFromGeometry(plGeometry& geom, plArra
 
   if (bTangents)
   {
-    geom.ComputeTangents();
+    PL_PROFILE_SCOPE("USD tangents");
+    PL_SUCCEED_OR_RETURN(plUsdTangents::Compute(geom));
   }
   else
   {
@@ -135,12 +286,29 @@ plStatus plUsdLiveResources::BuildMeshPartsFromGeometry(plGeometry& geom, plArra
     }
   }
 
+  if (cancelled.IsValid() && cancelled())
+  {
+    return plStatus("Superseded USD geometry.");
+  }
+
   const plDeque<plGeometry::Vertex>& vertices = geom.GetVertices();
   const plDeque<plGeometry::Polygon>& polygons = geom.GetPolygons();
 
   // Every part of a mesh uses the same vertex format.
   const bool bHighPrecision = NeedsHighPrecision(geom);
   const plUInt32 uiMaxVertices = bHighPrecision ? MaxVerticesPerPartHighPrecision : MaxVerticesPerPart;
+
+  auto publish = [&]() -> plStatus
+  {
+    if (onPart.IsValid())
+    {
+      PL_SUCCEED_OR_RETURN(onPart(out_parts.GetCount() - 1, out_parts.PeekBack()));
+      out_parts.PeekBack().Clear();
+      out_parts.PeekBack().Compact();
+    }
+
+    return plStatus(PL_SUCCESS);
+  };
 
   // Build orders the triangles by group, so each group is one range.
   if (vertices.GetCount() <= uiMaxVertices)
@@ -156,7 +324,7 @@ plStatus plUsdLiveResources::BuildMeshPartsFromGeometry(plGeometry& geom, plArra
     }
 
     SerializeMesh(geom, materialResources, subMeshes, uiContentHash, bHighPrecision, out_parts.ExpandAndGetRef());
-    return plStatus(PL_SUCCESS);
+    return publish();
   }
 
   // Too large for one message: split by triangles into parts that each stay under the vertex budget. A vertex shared
@@ -170,12 +338,19 @@ plStatus plUsdLiveResources::BuildMeshPartsFromGeometry(plGeometry& geom, plArra
   plHybridArray<SubMeshRange, 8> subMeshes;
   plUInt32 uiPart = 0;
 
-  auto flush = [&]()
+  auto flush = [&]() -> plStatus
   {
+    if (cancelled.IsValid() && cancelled())
+    {
+      return plStatus("Superseded USD geometry.");
+    }
+
     SerializeMesh(part, materialResources, subMeshes, uiContentHash + uiPart, bHighPrecision, out_parts.ExpandAndGetRef());
+    PL_SUCCEED_OR_RETURN(publish());
     part.Clear();
     subMeshes.Clear();
     ++uiPart;
+    return plStatus(PL_SUCCESS);
   };
 
   plUInt32 uiPolygon = 0;
@@ -196,7 +371,7 @@ plStatus plUsdLiveResources::BuildMeshPartsFromGeometry(plGeometry& geom, plArra
 
       if (part.GetVertices().GetCount() + uiNew > uiMaxVertices)
       {
-        flush();
+        PL_SUCCEED_OR_RETURN(flush());
       }
 
       if (subMeshes.IsEmpty() || subMeshes.PeekBack().m_uiMaterial != uiGroup)
@@ -223,7 +398,7 @@ plStatus plUsdLiveResources::BuildMeshPartsFromGeometry(plGeometry& geom, plArra
 
   if (!part.GetPolygons().IsEmpty())
   {
-    flush();
+    PL_SUCCEED_OR_RETURN(flush());
   }
 
   return plStatus(PL_SUCCESS);
@@ -242,26 +417,41 @@ void plUsdLiveResources::BuildMaterial(const plUsdSurface& surface, bool bBlendO
     uiHash = plHashingUtils::xxHash64String(*pFile, uiHash);
 
   plAssetFileHeader header;
-  header.SetFileHashAndVersion(uiHash, 1);
+  header.SetFileHashAndVersion(uiHash, 2);
   header.Write(w).IgnoreResult();
 
   w << (plUInt8)8; // plBinMaterial version, as written by plMaterialAssetDocument::WriteMaterialAsset
   w << (plUInt8)0; // uncompressed
 
-  w << plString(DefaultMaterial); // base material: supplies the render state; the constants are all written below
+  // Version 8 is already flattened: the loader discards this base reference rather than inheriting its state.
+  w << plString(DefaultMaterial);
   w << plString();                // surface
   w << plString("Shaders/Materials/DefaultMaterial.plShader");
 
   // Permutations. An opacity mask wins over constant opacity: it cuts foliage cards and fences, and blends grime decals,
   // which a cut would turn into solid sheets. Constant opacity below one is glass: transparent.
-  plHybridArray<std::pair<const char*, const char*>, 2> permutations;
+  // Every material-owned permutation must be explicit. Otherwise the render context retains the previous draw's
+  // value, e.g. an unlit marker can make subsequent USD meshes FULLBRIGHT as the visible draw order changes.
+  plHybridArray<std::pair<const char*, const char*>, 7> permutations;
+  permutations.PushBack({"SHADING_MODE", "SHADING_MODE_LIT"});
+  permutations.PushBack({"SHADING_WORKFLOW", "SHADING_WORKFLOW_METALLIC_ROUGHNESS"});
+  permutations.PushBack({"ENABLE_WEATHER", "FALSE"});
+  permutations.PushBack({"SNOW_VERTEX_COLOR", "FALSE"});
+  permutations.PushBack({"SSS_PROFILE", "SSS_PROFILE_NONE"});
   if (!surface.m_sOpacityTexture.IsEmpty())
+  {
     permutations.PushBack({"BLEND_MODE", bBlendOpacityMask ? "BLEND_MODE_TRANSPARENT" : "BLEND_MODE_MASKED"});
+  }
   else if (surface.m_fOpacity < 0.999f)
+  {
     permutations.PushBack({"BLEND_MODE", "BLEND_MODE_TRANSPARENT"});
+  }
+  else
+  {
+    permutations.PushBack({"BLEND_MODE", "BLEND_MODE_OPAQUE"});
+  }
 
-  if (surface.m_bDoubleSided)
-    permutations.PushBack({"TWO_SIDED", "TRUE"});
+  permutations.PushBack({"TWO_SIDED", surface.m_bDoubleSided ? "TRUE" : "FALSE"});
 
   w << (plUInt16)permutations.GetCount();
   for (const auto& perm : permutations)

@@ -1,5 +1,7 @@
 #include <EditorPluginUsd/EditorPluginUsdPCH.h>
 
+#include <EditorPluginUsd/LiveLink/UsdBakeStore.h>
+
 #include <Core/Graphics/Camera.h>
 #include <Core/World/Component.h>
 #include <Foundation/Reflection/ReflectionUtils.h>
@@ -65,12 +67,10 @@ namespace
     return fScale;
   }
 
-  /// Candela per nit of a sphere light: a glowing sphere seen from anywhere shows a disc of its radius, pi r^2. Unreal
-  /// spreads the candela over the whole surface, 4 pi r^2 (plUsdLight::m_bUnrealUnits).
+  /// Candela per nit of a USD sphere light: its projected disc has area pi r^2.
   float GetSphereCandelaPerNit(const plUsdLight& light)
   {
-    const float fDisc = plMath::Pi<float>() * light.m_fRadius * light.m_fRadius;
-    return light.m_bUnrealUnits ? 4.0f * fDisc : fDisc;
+    return plMath::Pi<float>() * light.m_fRadius * light.m_fRadius;
   }
 
   void ApplyLight(const Setter& set, const plUsdLight& light)
@@ -78,17 +78,23 @@ namespace
     const float fScale = ApplyColor(set, light);
     const float fLuminance = light.m_fLuminance * fScale;
 
+    if (light.m_Shape != plUsdLightShape::Distant && light.m_Shape != plUsdLightShape::Other)
+    {
+      set("Range", plMath::Max(light.m_fRange, 0.0f));
+    }
+
     // A normalized light keeps its power whatever its size: luminance * pi lumens, which the components take directly.
     const float fNormalizedLumens = fLuminance * plMath::Pi<float>();
+    const bool bUnrealPower = light.m_bUnrealUnits && !light.m_bNormalize && light.m_Shape == plUsdLightShape::Sphere;
 
     switch (light.m_Shape)
     {
       case plUsdLightShape::Sphere:
       {
-        if (light.m_bNormalize)
+        if (light.m_bNormalize || bUnrealPower)
         {
           set("IntensityUnit", (plInt64)plPunctualLightUnit::Lumen);
-          set("Intensity", fNormalizedLumens);
+          set("Intensity", bUnrealPower ? fLuminance * light.GetUnrealLumensPerNit() : fNormalizedLumens);
         }
         else
         {
@@ -102,7 +108,7 @@ namespace
         {
           // The cone masks the sphere's light rather than focusing it.
           const plAngle outer = light.m_ConeAngle;
-          set("Reflector", false);
+          set("Reflector", bUnrealPower);
           set("OuterSpotAngle", outer);
           set("InnerSpotAngle", outer * plMath::Clamp(1.0f - light.m_fConeSoftness, 0.0f, 1.0f));
         }
@@ -117,6 +123,7 @@ namespace
       case plUsdLightShape::Disk:
       case plUsdLightShape::Cylinder:
       {
+        // Unnormalized USD area-light intensity is already nits. Preserve the source value and unit directly.
         if (light.m_bNormalize)
         {
           set("IntensityUnit", (plInt64)plAreaLightUnit::Lumen);
@@ -315,6 +322,12 @@ bool plUsdPrimComponents::ReadBack(const plDocumentObject* pComponent, const plU
 
   plUsdLight& l = out_light;
 
+  if (changed("Range"))
+  {
+    l.m_fRange = plMath::Max(get("Range").ConvertTo<float>(), 0.0f);
+    bChanged = true;
+  }
+
   if (changed("LightColor"))
   {
     l.m_Color = plColor(get("LightColor").ConvertTo<plColorGammaUB>());
@@ -341,31 +354,7 @@ bool plUsdPrimComponents::ReadBack(const plDocumentObject* pComponent, const plU
     bChanged = true;
   }
 
-  // Lumen is USD's normalized light: its output stays the same whatever its size.
-  if (changed("Intensity") || changed("IntensityUnit"))
-  {
-    const float fIntensity = get("Intensity").ConvertTo<float>();
-
-    if (l.m_Shape == plUsdLightShape::Distant)
-    {
-      l.m_fLuminance = fIntensity;
-    }
-    else
-    {
-      const bool bLumen = get("IntensityUnit").ConvertTo<plInt64>() == 0;
-      l.m_bNormalize = bLumen;
-
-      if (bLumen)
-        l.m_fLuminance = fIntensity / plMath::Pi<float>();
-      else if (l.m_Shape == plUsdLightShape::Sphere && l.m_fRadius > 0.0f)
-        l.m_fLuminance = fIntensity / GetSphereCandelaPerNit(l);
-      else
-        l.m_fLuminance = fIntensity;
-    }
-
-    bChanged = true;
-  }
-
+  // Read dimensions and cone before converting power back into luminance.
   if (changed("OuterSpotAngle") || changed("InnerSpotAngle"))
   {
     const plAngle outer = get("OuterSpotAngle").ConvertTo<plAngle>();
@@ -378,18 +367,75 @@ bool plUsdPrimComponents::ReadBack(const plDocumentObject* pComponent, const plU
   for (const char* szSize : {"Width", "Height", "Radius", "Length"})
   {
     if (!changed(szSize))
+    {
       continue;
+    }
 
     const float fValue = get(szSize).ConvertTo<float>();
     const plStringView sSize = szSize;
     if (sSize == "Width")
+    {
       l.m_fWidth = fValue;
+    }
     else if (sSize == "Height")
+    {
       l.m_fHeight = fValue;
+    }
     else if (sSize == "Radius")
+    {
       l.m_fRadius = fValue;
+    }
     else
+    {
       l.m_fLength = fValue;
+    }
+
+    bChanged = true;
+  }
+
+  const bool bUnrealDimensionsChanged = l.m_bUnrealUnits && !l.m_bNormalize &&
+                                        (changed("Width") || changed("Height") || changed("Radius") || changed("OuterSpotAngle"));
+
+  // Unreal-derived lumens keep their USD normalization convention when edited.
+  if (changed("Intensity") || changed("IntensityUnit") || bUnrealDimensionsChanged)
+  {
+    const float fIntensity = get("Intensity").ConvertTo<float>();
+
+    if (l.m_Shape == plUsdLightShape::Distant)
+    {
+      l.m_fLuminance = fIntensity;
+    }
+    else
+    {
+      const bool bLumen = get("IntensityUnit").ConvertTo<plInt64>() == 0;
+      const bool bUnrealPower = bLumen && l.m_bUnrealUnits && !l.m_bNormalize && l.m_Shape == plUsdLightShape::Sphere;
+
+      if (bUnrealPower)
+      {
+        l.m_fLuminance = fIntensity / l.GetUnrealLumensPerNit();
+      }
+      else if (bLumen)
+      {
+        l.m_fLuminance = fIntensity / plMath::Pi<float>();
+        l.m_bNormalize = true;
+      }
+      else if (l.m_Shape == plUsdLightShape::Sphere && l.m_bUnrealUnits)
+      {
+        l.m_fLuminance = fIntensity * l.GetUnrealSolidAngle() / l.GetUnrealLumensPerNit();
+        l.m_bNormalize = false;
+      }
+      else if (l.m_Shape == plUsdLightShape::Sphere && l.m_fRadius > 0.0f)
+      {
+        l.m_fLuminance = fIntensity / GetSphereCandelaPerNit(l);
+        l.m_bNormalize = false;
+      }
+      else
+      {
+        l.m_fLuminance = fIntensity;
+        l.m_bNormalize = false;
+      }
+    }
+
     bChanged = true;
   }
 
@@ -431,7 +477,10 @@ void plUsdPrimComponents::Apply(plDocumentObjectManager* pManager, const plDocum
   const plDocumentObject* pExisting = pManager->GetObject(componentGuid);
   if (pExisting != nullptr && pExisting->GetType() != pType)
   {
-    accessor.RemoveObject(pExisting).IgnoreResult();
+    if (RemoveObject(pManager, pExisting).Failed())
+    {
+      return;
+    }
     pExisting = nullptr;
   }
 
@@ -614,7 +663,7 @@ void plUsdPrimComponents::ApplyUserComponents(plDocumentObjectManager* pManager,
       continue;
 
     if (const plDocumentObject* pComponent = FindUserComponent(pObject, generated, old.m_sType))
-      accessor.RemoveObject(pComponent).IgnoreResult();
+      RemoveObject(pManager, pComponent).IgnoreResult();
   }
 
   for (const plUsdComponent& component : components)
@@ -682,8 +731,10 @@ void plUsdPrimComponents::ApplyInstances(plDocumentObjectManager* pManager, cons
   for (plInt32 iCount = data.GetCount("InstanceData"); iCount > (plInt32)instances.GetCount(); --iCount)
   {
     const plDocumentObject* pElement = pManager->GetObject(data.GetValue("InstanceData", iCount - 1).ConvertTo<plUuid>());
-    if (pElement == nullptr || accessor.RemoveObject(pElement).Failed())
+    if (pElement == nullptr || RemoveObject(pManager, pElement).Failed())
+    {
       break;
+    }
   }
 
   const plRTTI* pElementType = plGetStaticRTTI<plMeshInstanceData>();
@@ -714,5 +765,38 @@ void plUsdPrimComponents::ApplyInstances(plDocumentObjectManager* pManager, cons
     set(pElement, "LocalPosition", t.m_vPosition);
     set(pElement, "LocalRotation", t.m_qRotation);
     set(pElement, "LocalScaling", t.m_vScale);
+  }
+}
+
+plStatus plUsdPrimComponents::RemoveObject(plDocumentObjectManager* pManager, const plDocumentObject* pObject)
+{
+  plDocumentObject* object = pManager->GetObject(pObject->GetGuid());
+  plObjectDirectAccessor accessor(pManager);
+  PL_SUCCEED_OR_RETURN(accessor.RemoveObject(object));
+  pManager->DestroyObject(object);
+  return plStatus(PL_SUCCESS);
+}
+
+void plUsdPrimComponents::ApplyMaterials(plDocumentObjectManager* pManager, const plDocumentObject* pComponent,
+  plStringView sLinkId, plArrayPtr<const plUsdMaterialGroup> groups)
+{
+  plDocumentObject* object = pManager->GetObject(pComponent->GetGuid());
+  plInt32 count = object->GetTypeAccessor().GetCount("Materials");
+  for (plUInt32 i = 0; i < groups.GetCount(); ++i)
+  {
+    const plString material = plUsdBakeStore::GetMaterialResource(sLinkId, groups[i]);
+    if (i >= (plUInt32)count)
+    {
+      pManager->InsertValue(object, "Materials", material, i).IgnoreResult();
+    }
+    else if (object->GetTypeAccessor().GetValue("Materials", i) != plVariant(material))
+    {
+      pManager->SetValue(object, "Materials", material, i).IgnoreResult();
+    }
+  }
+
+  while (count > (plInt32)groups.GetCount())
+  {
+    pManager->RemoveValue(object, "Materials", --count).IgnoreResult();
   }
 }

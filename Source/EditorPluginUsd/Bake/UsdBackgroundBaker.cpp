@@ -1,5 +1,8 @@
 #include <EditorPluginUsd/EditorPluginUsdPCH.h>
 
+#include <EditorPluginUsd/LiveLink/UsdMeshCache.h>
+#include <Foundation/Types/ScopeExit.h>
+
 #include <EditorPluginUsd/Bake/UsdBackgroundBaker.h>
 #include <EditorPluginUsd/Bake/UsdBakePrefab.h>
 #include <EditorPluginUsd/LiveLink/UsdBakeStore.h>
@@ -10,6 +13,7 @@
 #include <Foundation/Algorithm/HashingUtils.h>
 #include <Foundation/IO/OSFile.h>
 #include <Foundation/Threading/DelegateTask.h>
+#include <Foundation/Threading/AtomicInteger.h>
 #include <ToolsFoundation/Document/DocumentManager.h>
 #include <ToolsFoundation/Project/ToolsProject.h>
 #include <UsdBridge/UsdStage.h>
@@ -34,6 +38,7 @@ struct plUsdBackgroundBaker::Job
   plHashTable<plString, plUInt64> m_MaterialHashes;
   plStatus m_Result;
   plTaskGroupID m_Task;
+  plAtomicBool m_Cancelled = false;
   bool m_bWorkerDone = false;
 };
 
@@ -48,6 +53,7 @@ void plUsdBackgroundBaker::Clear()
 {
   if (m_pJob != nullptr)
   {
+    m_pJob->m_Cancelled = true;
     plTaskSystem::WaitForGroup(m_pJob->m_Task);
     m_pJob.Clear();
   }
@@ -99,7 +105,7 @@ void plUsdBackgroundBaker::UpdateDocument(plStringView sDocumentPath)
 {
   for (plUInt32 i = m_Links.GetCount(); i-- > 0;)
   {
-    if (m_Links[i].m_sDocument == sDocumentPath)
+    if (m_Links[i].m_sDocument.IsEqual_NoCase(sDocumentPath))
       m_Links.RemoveAtAndCopy(i);
   }
 
@@ -130,7 +136,9 @@ bool plUsdBackgroundBaker::IsDocumentOpen(const Link& link) const
   for (plDocumentManager* pManager : plDocumentManager::GetAllDocumentManagers())
   {
     if (pManager->GetDocumentByPath(link.m_sDocument) != nullptr)
+    {
       return true;
+    }
   }
 
   return false;
@@ -138,8 +146,11 @@ bool plUsdBackgroundBaker::IsDocumentOpen(const Link& link) const
 
 bool plUsdBackgroundBaker::NeedsBake(const Link& link) const
 {
-  if (!plOSFile::ExistsFile(link.m_sStageFile))
+  if (!plOSFile::ExistsFile(link.m_sDocument) || !plOSFile::ExistsFile(plStringBuilder(link.m_sDocument, SidecarExtension)) ||
+      !plOSFile::ExistsFile(link.m_sStageFile))
+  {
     return false;
+  }
 
   plUsdBakeStore::Manifest manifest;
   plUsdBakeStore::LoadManifest(link.m_sLinkId, manifest);
@@ -202,12 +213,25 @@ void plUsdBackgroundBaker::UpdateJob()
 {
   Job& job = *m_pJob;
 
+  if (IsDocumentOpen(job.m_Link) || !plOSFile::ExistsFile(job.m_Link.m_sDocument) ||
+      !plOSFile::ExistsFile(plStringBuilder(job.m_Link.m_sDocument, SidecarExtension)))
+  {
+    job.m_Cancelled = true;
+  }
+
   if (!job.m_bWorkerDone)
   {
     if (!plTaskSystem::IsTaskGroupFinished(job.m_Task))
       return;
 
     job.m_bWorkerDone = true;
+
+    if (job.m_Cancelled)
+    {
+      m_pJob.Clear();
+      m_sStatus.Clear();
+      return;
+    }
 
     if (job.m_Result.Failed())
     {
@@ -217,6 +241,13 @@ void plUsdBackgroundBaker::UpdateJob()
       m_sStatus.Clear();
       return;
     }
+  }
+
+  if (job.m_Cancelled)
+  {
+    m_pJob.Clear();
+    m_sStatus.Clear();
+    return;
   }
 
   // Materials, once every texture they use is prepared. The texture cache is main-thread only.
@@ -303,6 +334,11 @@ void plUsdBackgroundBaker::RunWorker(Job& job)
 
     for (plUInt32 i = 0; i < prims.GetCount(); ++i)
     {
+      if (job.m_Cancelled)
+      {
+        return;
+      }
+
       plUsdBakeNode& node = job.m_Nodes[i];
       node.m_Prim = std::move(prims[i]);
       const plUsdPrim& prim = node.m_Prim;
@@ -326,13 +362,15 @@ void plUsdBackgroundBaker::RunWorker(Job& job)
 
       const plUInt64 uiMeshKey = plUsdBakeStore::GetMeshKey(link.m_sLinkId, geometry, prim.m_MaterialGroups);
       const plString sMesh = plUsdBakeStore::GetMeshName(link.m_sLinkId, geometry, uiMeshKey);
+      const auto* existing = job.m_Manifest.m_Meshes.GetValue(sMesh);
+      plString resourceMesh = existing != nullptr && !existing->m_sResourceMesh.IsEmpty() ? existing->m_sResourceMesh : sMesh;
 
       plUInt32 uiParts = 0;
       if (!meshParts.TryGetValue(sMesh, uiParts))
       {
         // Built from the same layer files as last time, and its files still there: nothing to build.
         const plUsdBakeStore::MeshEntry* pEntry = job.m_Manifest.m_Meshes.GetValue(sMesh);
-        if (pEntry != nullptr && pEntry->m_uiFileStamp == geometry.m_uiFileStamp && plUsdBakeStore::HasMeshFiles(sMesh, pEntry->m_uiParts))
+        if (pEntry != nullptr && pEntry->m_uiFileStamp == geometry.m_uiFileStamp && plUsdBakeStore::HasMeshFiles(resourceMesh, pEntry->m_uiParts))
         {
           uiParts = pEntry->m_uiParts;
         }
@@ -343,7 +381,48 @@ void plUsdBackgroundBaker::RunWorker(Job& job)
 
           plDynamicArray<plDynamicArray<plUInt8>> parts;
           if (pSource != nullptr)
-            res = plUsdLiveResources::BuildMeshParts(*pSource, materials, uiMeshKey, plUsdLiveResources::NeedsTangents(prim.m_MaterialGroups), parts);
+          {
+            const plUInt64 contentKey = plUsdMeshCache::GetKey(pSource->GetHash(), materials.GetCount());
+            resourceMesh = plUsdMeshCache::GetMeshName(contentKey);
+            if (!plUsdMeshCache::TryAcquire(resourceMesh, pSource->GetPointCount()))
+            {
+              job.m_Result = plStatus("Waiting for the live link's shared geometry builds.");
+              return;
+            }
+            PL_SCOPE_EXIT(plUsdMeshCache::Release(resourceMesh));
+
+            auto cached = plUsdMeshCache::Read(resourceMesh);
+            uiParts = cached.m_uiParts;
+            if (uiParts == 0)
+            {
+              for (plString& material : materials)
+              {
+                material = plUsdLiveResources::DefaultMaterial;
+              }
+
+              auto publish = [&](plUInt32 part, plArrayPtr<const plUInt8> bytes) -> plStatus
+              {
+                if (job.m_Cancelled)
+                {
+                  return plStatus("Background bake cancelled.");
+                }
+
+                return plStatus(plUsdBakeStore::WriteFile(plUsdBakeStore::GetMeshResource(resourceMesh, part), bytes));
+              };
+              res = plUsdLiveResources::BuildMeshParts(*pSource, materials, contentKey, true, parts, publish, {},
+                [&job]() { return (bool)job.m_Cancelled; });
+              if (res.Succeeded() && !job.m_Cancelled)
+              {
+                uiParts = parts.GetCount();
+                res = plStatus(plUsdMeshCache::Publish(resourceMesh, uiParts, false));
+              }
+            }
+          }
+
+          if (job.m_Cancelled)
+          {
+            return;
+          }
 
           if (res.Failed())
           {
@@ -351,11 +430,11 @@ void plUsdBackgroundBaker::RunWorker(Job& job)
           }
           else
           {
-            for (plUInt32 uiPart = 0; uiPart < parts.GetCount(); ++uiPart)
-              plUsdBakeStore::WriteFile(plUsdBakeStore::GetMeshResource(sMesh, uiPart), parts[uiPart]).IgnoreResult();
-
-            uiParts = parts.GetCount();
-            job.m_Manifest.m_Meshes[sMesh] = {geometry.m_uiFileStamp, uiParts};
+            auto& entry = job.m_Manifest.m_Meshes[sMesh];
+            entry = plUsdMeshCache::Read(resourceMesh);
+            entry.m_uiFileStamp = geometry.m_uiFileStamp;
+            entry.m_uiParts = uiParts;
+            entry.m_sResourceMesh = resourceMesh;
           }
         }
 
@@ -366,8 +445,8 @@ void plUsdBackgroundBaker::RunWorker(Job& job)
         continue;
 
       node.m_uiMeshParts = uiParts;
-      node.m_sMesh = sMesh;
-      job.m_Manifest.m_Prims[prim.m_sPath] = {sMesh, uiParts};
+      node.m_sMesh = resourceMesh;
+      job.m_Manifest.m_Prims[prim.m_sPath] = {resourceMesh, uiParts};
     }
 
     plUsdBakeStore::RecordLayers(stage, job.m_Manifest.m_Layers);

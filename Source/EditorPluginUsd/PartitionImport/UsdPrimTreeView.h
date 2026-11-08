@@ -63,6 +63,12 @@ public:
   /// child with a box.
   void SetChecked(plUInt32 uiItem, bool bChecked);
 
+  /// Sets every enabled check box, including collapsed branches, and updates parent states once.
+  void SetAllChecked(bool bChecked);
+
+  /// Whether every enabled check box is checked. False when there are no enabled check boxes.
+  bool AreAllChecked() const;
+
   /// Replaces the item's size column and its tooltip.
   void SetSize(plUInt32 uiItem, plStringView sSize, plStringView sToolTip);
 

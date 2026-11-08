@@ -22,15 +22,17 @@ namespace
   /// the same long-running threads, so half the cores, within limits.
   plUInt32 GetMaxConcurrentPreparations()
   {
-    return plMath::Clamp(plSystemInformation::Get().GetCPUCoreCount() / 2, 2u, 6u);
+    const auto& system = plSystemInformation::Get();
+    const plUInt32 byMemory = (plUInt32)(system.GetAvailableMainMemory() / (512ull << 20));
+    return plMath::Clamp(plMath::Min(system.GetCPUCoreCount() / 2, byMemory), 1u, 6u);
   }
 
   /// A conversion keeps about one core busy - BC4 and BC5 are compressed on the CPU in one thread, BC7 on the GPU - and
-  /// holds up to 1.3 GB for a 4K texture with a mask. So one per four cores and per 8 GB of memory, one to three.
+  /// holds up to 1.3 GB for a 4K texture with a mask. Use available memory, not installed RAM, to avoid paging.
   plUInt32 GetMaxConcurrentConversions()
   {
     const plUInt32 uiByCores = plSystemInformation::Get().GetCPUCoreCount() / 4;
-    const plUInt32 uiByMemory = static_cast<plUInt32>(plSystemInformation::Get().GetInstalledMainMemory() / (8ull << 30));
+    const plUInt32 uiByMemory = static_cast<plUInt32>(plSystemInformation::Get().GetAvailableMainMemory() / (2ull << 30));
     return plMath::Clamp(plMath::Min(uiByCores, uiByMemory), 1u, 3u);
   }
 

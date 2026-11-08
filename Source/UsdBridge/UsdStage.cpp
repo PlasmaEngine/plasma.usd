@@ -13,6 +13,11 @@
 #include <UsdBridge/UsdStage.h>
 #include <UsdBridge/UsdStageAccess.h>
 
+// Keep bulk geometry hashing optimized even when the host engine's Foundation DLL is a debug-friendly build.
+// The inline implementation produces the same xxHash64 values as plHashingUtils.
+#define XXH_INLINE_ALL
+#include <Foundation/ThirdParty/xxHash/xxhash.h>
+
 #pragma warning(push, 0)
 #include <pxr/base/gf/quatf.h>
 #include <pxr/base/tf/stringUtils.h>
@@ -202,7 +207,7 @@ bool plUsdLight::operator==(const plUsdLight& rhs) const
   return m_Shape == rhs.m_Shape && m_Color == rhs.m_Color && m_bUseTemperature == rhs.m_bUseTemperature && m_fTemperature == rhs.m_fTemperature &&
          m_fLuminance == rhs.m_fLuminance && m_bNormalize == rhs.m_bNormalize && m_bUnrealUnits == rhs.m_bUnrealUnits && m_fRadius == rhs.m_fRadius &&
          m_fWidth == rhs.m_fWidth &&
-         m_fHeight == rhs.m_fHeight && m_fLength == rhs.m_fLength && m_ConeAngle == rhs.m_ConeAngle && m_fConeSoftness == rhs.m_fConeSoftness &&
+         m_fHeight == rhs.m_fHeight && m_fLength == rhs.m_fLength && m_fRange == rhs.m_fRange && m_ConeAngle == rhs.m_ConeAngle && m_fConeSoftness == rhs.m_fConeSoftness &&
          m_fDiffuse == rhs.m_fDiffuse && m_fSpecular == rhs.m_fSpecular && m_bCastShadows == rhs.m_bCastShadows;
 }
 
@@ -211,6 +216,40 @@ bool plUsdCamera::operator==(const plUsdCamera& rhs) const
   return m_bOrthographic == rhs.m_bOrthographic && m_fFocalLength == rhs.m_fFocalLength && m_fHorizontalAperture == rhs.m_fHorizontalAperture &&
          m_fVerticalAperture == rhs.m_fVerticalAperture && m_fOrthoWidth == rhs.m_fOrthoWidth && m_fNear == rhs.m_fNear && m_fFar == rhs.m_fFar &&
          m_fFStop == rhs.m_fFStop && m_fFocusDistance == rhs.m_fFocusDistance && m_fExposure == rhs.m_fExposure;
+}
+
+float plUsdLight::GetUnrealSolidAngle() const
+{
+  if (m_Shape == plUsdLightShape::Sphere)
+  {
+    return m_ConeAngle.GetDegree() < 180.0f
+             ? 2.0f * plMath::Pi<float>() * (1.0f - plMath::Cos(plAngle::MakeFromRadian(plMath::Max(m_ConeAngle.GetRadian() * 0.5f, 0.001f))))
+             : 4.0f * plMath::Pi<float>();
+  }
+
+  return plMath::Pi<float>();
+}
+
+float plUsdLight::GetUnrealLumensPerNit() const
+{
+  const float fSolidAngle = GetUnrealSolidAngle();
+  float fArea = 0.0f;
+
+  if (m_Shape == plUsdLightShape::Sphere)
+  {
+    fArea = fSolidAngle * m_fRadius * m_fRadius;
+  }
+  else if (m_Shape == plUsdLightShape::Rect)
+  {
+    fArea = m_fWidth * m_fHeight;
+  }
+  else if (m_Shape == plUsdLightShape::Disk)
+  {
+    fArea = plMath::Pi<float>() * m_fRadius * m_fRadius;
+  }
+
+  // Unreal clamps its emitting area, including point lights with zero source radius.
+  return fSolidAngle * plMath::Max(fArea, 0.0001f);
 }
 
 plUInt64 plUsdLight::ComputeHash(plUInt64 uiSeed) const
@@ -519,34 +558,42 @@ namespace
     return kind == plUsdPrimKind::Light || kind == plUsdPrimKind::Camera;
   }
 
-  plMat4d GetLookCorrection4(const plUsdBasis& basis)
+  plMat4d GetLookCorrection4(const plUsdBasis& basis, const pxr::UsdPrim& prim)
   {
-    return plMat4d(basis.GetLookCorrection(), plVec3d::MakeZero());
+    plMat3d correction = basis.GetLookCorrection();
+
+    // Rectangles and disks emit along Plasma -X; cameras and punctual lights look along +X.
+    // Flip around the light's up axis, keeping its width, height and handedness intact.
+    if (prim.IsA<pxr::UsdLuxRectLight>() || prim.IsA<pxr::UsdLuxDiskLight>())
+    {
+      correction.SetColumn(0, -correction.GetColumn(0));
+      correction.SetColumn(1, -correction.GetColumn(1));
+    }
+
+    return plMat4d(correction, plVec3d::MakeZero());
   }
 
   /// A prim's local matrix in Plasma's frame -> the matrix of its object, and back. See plUsdPrim::m_LocalTransform.
   plMat4d AddLookCorrection(const plUsdBasis& basis, const pxr::UsdPrim& prim, const plMat4d& mLocal)
   {
-    const plMat4d mLook = GetLookCorrection4(basis);
     plMat4d m = mLocal;
 
     if (HasLookCorrection(GetPrimKind(prim)))
-      m = m * mLook;
+      m = m * GetLookCorrection4(basis, prim);
     if (HasLookCorrection(GetPrimKind(prim.GetParent())))
-      m = mLook.GetTranspose() * m;
+      m = GetLookCorrection4(basis, prim.GetParent()).GetTranspose() * m;
 
     return m;
   }
 
   plMat4d RemoveLookCorrection(const plUsdBasis& basis, const pxr::UsdPrim& prim, const plMat4d& mObject)
   {
-    const plMat4d mLook = GetLookCorrection4(basis);
     plMat4d m = mObject;
 
     if (HasLookCorrection(GetPrimKind(prim)))
-      m = m * mLook.GetTranspose();
+      m = m * GetLookCorrection4(basis, prim).GetTranspose();
     if (HasLookCorrection(GetPrimKind(prim.GetParent())))
-      m = mLook * m;
+      m = GetLookCorrection4(basis, prim.GetParent()) * m;
 
     return m;
   }
@@ -599,6 +646,25 @@ namespace
     GetValue(light.GetColorTemperatureAttr(), out_light.m_fTemperature);
     GetValue(light.GetDiffuseAttr(), out_light.m_fDiffuse);
     GetValue(light.GetSpecularAttr(), out_light.m_fSpecular);
+
+    // UsdLux radius is emitter size, not attenuation. Range is an optional renderer/exporter extension,
+    // in stage units. Plasma's authored override wins over imported extensions.
+    for (const char* name : {"plasma:light:range", "inputs:attenuationRadius", "unreal:attenuationRadius", "inputs:range"})
+    {
+      const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(name));
+      pxr::VtValue value;
+      if (!attr || !attr.HasAuthoredValueOpinion() || !attr.Get(&value, pxr::UsdTimeCode::EarliestTime()) || !value.CanCast<double>())
+      {
+        continue;
+      }
+
+      const double range = value.Cast<double>().Get<double>() * fMetersPerUnit;
+      if (plMath::IsFinite(range) && range >= 0.0 && range <= plMath::MaxValue<float>())
+      {
+        out_light.m_fRange = (float)range;
+        break;
+      }
+    }
 
     // Shadows are on unless the ShadowAPI turns them off.
     if (prim.HasAPI<pxr::UsdLuxShadowAPI>())
@@ -1472,7 +1538,7 @@ namespace
   template <typename T>
   plUInt64 HashArray(const pxr::VtArray<T>& values, plUInt64 uiSeed)
   {
-    return plHashingUtils::xxHash64(values.cdata(), values.size() * sizeof(T), uiSeed);
+    return XXH64(values.cdata(), values.size() * sizeof(T), uiSeed);
   }
 
   /// The arrays are VtArrays: copying one only takes a reference, and a later edit or reload of the layer creates new
@@ -1938,6 +2004,13 @@ plUniquePtr<plUsdGeometrySource> plUsdStage::CaptureGeometry(plStringView sPrimP
     return CaptureMesh(m_pImpl->m_Basis, mesh, out_status);
 
   return CaptureGprim(m_pImpl->m_Basis, prim, out_status);
+}
+
+plUInt64 plUsdStage::GetGeometryPointCount(plStringView sPrimPath) const
+{
+  const pxr::UsdGeomMesh mesh(m_pImpl->GetPrim(sPrimPath));
+  pxr::VtVec3fArray points;
+  return mesh && GetValue(mesh.GetPointsAttr(), points) ? points.size() : 0;
 }
 
 plStatus plUsdStage::ExtractGeometry(plStringView sPrimPath, plGeometry& out_geometry) const
@@ -2537,6 +2610,11 @@ plStatus plUsdStage::AuthorLight(plStringView sPrimPath, const plUsdLight& light
 
   if (light.m_bCastShadows != current.m_bCastShadows)
     pxr::UsdLuxShadowAPI::Apply(prim).CreateShadowEnableAttr().Set(light.m_bCastShadows);
+
+  if (Differs(light.m_fRange, current.m_fRange))
+  {
+    prim.CreateAttribute(pxr::TfToken("plasma:light:range"), pxr::SdfValueTypeNames->Float, true).Set(plMath::Max(light.m_fRange, 0.0f) / k);
+  }
 
   switch (current.m_Shape)
   {

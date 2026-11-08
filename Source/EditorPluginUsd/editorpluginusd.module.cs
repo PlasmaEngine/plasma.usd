@@ -10,6 +10,11 @@ public class EditorPluginUsdModule : ModuleRules
 
         PlasmaPackageSdk.ConfigureEditorSdkConsumer(this, context);
 
+        if (context.Configuration == BuildConfiguration.Development)
+        {
+            OptimizeCode = OptimizationLevel.Shipping;
+        }
+
         // The live hub is a local TCP server on Winsock.
         PrivateLibraries.Add("Ws2_32.lib");
 
@@ -22,6 +27,7 @@ public class EditorPluginUsdModule : ModuleRules
 
         // Everything that touches OpenUSD is in UsdBridge, compiled into this plugin.
         PublicDependencies.Add("UsdBridgeModule");
+        PublicDependencies.Add("UsdMeshoptModule");
 
         // Importing a stage as a world partition writes cells of the scene plugin's partitions.
         PublicIncludePaths.Add(System.IO.Path.Combine(PlasmaPackageSdk.Root, "Code", "EditorPlugins", "Scene"));
