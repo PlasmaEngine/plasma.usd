@@ -8,7 +8,7 @@ PackageInfo
 {
 	// ---- identity -------------------------------------------------------------
 	string %Id{"plasma.usd"}
-	string %Version{"0.2.2"}
+	string %Version{"0.3.0"}
 	string %Publisher{"PlasmaTechnology"}
 	// OpenUSD and oneTBB are Apache-2.0 and come as DLLs, so their licences and notice are staged
 	// next to them in Bin/.
@@ -16,9 +16,9 @@ PackageInfo
 	string %Homepage{"https://plasmagameengine.com"}
 
 	// ---- compatibility --------------------------------------------------------
-	string %MinEngineVersion{"0.11.2"}
-	string %MaxEngineVersion{"0.11.2"}
-	string %AbiTag{"win64-msvc19-0.11.2-abi6-dev"}
+	string %MinEngineVersion{"0.12.0"}
+	string %MaxEngineVersion{"0.12.0"}
+	string %AbiTag{"win64-msvc19-0.12.0-abi7-dev"}
 
 	// ---- presentation ---------------------------------------------------------
 	string %DisplayName{"USD Live Link"}

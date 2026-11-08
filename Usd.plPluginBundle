@@ -5,8 +5,8 @@ PluginInfo
 {
 	string %DisplayName{"USD Live Link"}
 	string %Category{"Tools"}
-	string %MinEngineVersion{"0.11.2"}
-	string %MaxEngineVersion{"0.11.2"}
+	string %MinEngineVersion{"0.12.0"}
+	string %MaxEngineVersion{"0.12.0"}
 	string %Icon{"UsdIcon.png"}
 	string %Banner{"UsdBanner.png"}
 	string %Description{"Opens OpenUSD stages in scenes and prefabs and keeps them live with Blender, Houdini and Maya, imports USD files as meshes, and keeps a baked copy of every linked stage for exports and games. Nothing is added to a shipped game."}
