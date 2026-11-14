@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Plasma USD Live for 3ds Max 2024 and later, as an Autodesk application package. 3ds Max reads the packages in
+     ApplicationPlugins at startup; the Plasma editor's Apps tab copies this folder to
+     %APPDATA%/Autodesk/ApplicationPlugins/PlasmaUsdLive. -->
+<ApplicationPackage SchemaVersion="1.0" AutodeskProduct="3ds Max" ProductType="Application" Name="Plasma USD Live"
+                    AppVersion="0.3.0" Description="Join the Plasma editor's USD live sessions from 3ds Max."
+                    Author="Plasma Engine" ProductCode="{6E3A1C52-8B0F-4D1E-A7C4-3F2B9D5E8A10}"
+                    UpgradeCode="{6E3A1C52-8B0F-4D1E-A7C4-3F2B9D5E8A11}">
+  <CompanyDetails Name="Plasma Engine" />
+  <RuntimeRequirements OS="Win64" Platform="3ds Max" SeriesMin="2024" />
+  <Components Description="pre-start-up scripts parts">
+    <RuntimeRequirements OS="Win64" Platform="3ds Max" SeriesMin="2024" />
+    <ComponentEntry Name="Plasma menu" AppName="PlasmaUsdLiveMenu" Version="0.3.0"
+                    ModuleName="./Contents/startup/plasma_usd_live_menu.ms" />
+  </Components>
+  <Components Description="post-start-up scripts parts">
+    <RuntimeRequirements OS="Win64" Platform="3ds Max" SeriesMin="2024" />
+    <ComponentEntry Name="Plasma USD Live" AppName="PlasmaUsdLive" Version="0.3.0"
+                    ModuleName="./Contents/startup/plasma_usd_live.ms" />
+  </Components>
+</ApplicationPackage>

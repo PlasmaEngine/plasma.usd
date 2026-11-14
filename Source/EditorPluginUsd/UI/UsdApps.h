@@ -23,11 +23,12 @@ class plUsdLiveLink;
 ///   Blender   an extension in the user_default repository, built and installed with Blender's own command line
 ///   Houdini   <preferences>/plasma_usd_live, and packages/plasma_usd_live.json pointing at it
 ///   Maya      <maya app folder>/modules/plasma_usd_live, and modules/plasma_usd_live.mod naming it
+///   3ds Max   %APPDATA%/Autodesk/ApplicationPlugins/PlasmaUsdLive, an application package every version reads
 /// A connector installed some other way, such as a developer's link to the package source, is reported as linked and left
 /// alone.
 ///
-/// Open launches a tool into a link's session: Blender with the stage and session on its command line, Houdini and Maya
-/// with PLASMA_USD_LIVE_STAGE and PLASMA_USD_LIVE_SESSION in their environment. The connectors join on startup. Launched
+/// Open launches a tool into a link's session: Blender with the stage and session on its command line, Houdini, Maya and
+/// 3ds Max with PLASMA_USD_LIVE_STAGE and PLASMA_USD_LIVE_SESSION in their environment. The connectors join on startup. Launched
 /// processes are matched to the live hub's participants by the process id they send with their hello.
 class PL_EDITORPLUGINUSD_DLL plUsdApps
 {
@@ -42,6 +43,7 @@ public:
     Blender,
     Houdini,
     Maya,
+    Max, ///< 3ds Max
     Count
   };
 
@@ -50,7 +52,7 @@ public:
 
   static const char* GetName(App app);
 
-  /// \brief Accepts the name case-insensitively ("blender", "Houdini").
+  /// \brief Accepts the name case-insensitively and without spaces ("blender", "Houdini", "3dsmax"); "Max" names 3ds Max.
   static bool FindApp(plStringView sName, App& out_app);
 
   enum class ConnectorState : plUInt8
@@ -204,6 +206,7 @@ private:
   void EvaluateBlender(Install& ref_install) const;
   void EvaluateHoudini(Install& ref_install) const;
   void EvaluateMaya(Install& ref_install) const;
+  void EvaluateMax(Install& ref_install) const;
   void UpdateRunning();
 
   /// \brief A tool run in the background; its output is collected until it ends.
@@ -228,6 +231,8 @@ private:
   plStatus RemoveHoudini(const Install& install);
   plStatus InstallMaya(const Install& install);
   plStatus RemoveMaya(const Install& install);
+  plStatus InstallMax(const Install& install);
+  plStatus RemoveMax(const Install& install);
 
   AppState m_Apps[(int)App::Count];
   plHashTable<plString, BlenderProbe> m_BlenderProbes; ///< Executable -> what it reported last.
