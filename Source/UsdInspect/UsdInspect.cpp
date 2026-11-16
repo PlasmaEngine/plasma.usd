@@ -432,7 +432,7 @@ namespace
 
           plContiguousMemoryStreamStorage storage;
           plMemoryStreamWriter writer(&storage);
-          desc.SaveWithProxy(writer, proxy, fProxyError);
+          desc.SaveWithProxies(writer, plArrayPtr<plMeshResourceDescriptor>(&proxy, 1), plArrayPtr<const float>(&fProxyError, 1));
 
           plMeshResourceDescriptor loadedProxy;
           plMeshResourceDescriptor loadedFull;
@@ -440,10 +440,10 @@ namespace
           plMeshResourceDescriptor::DetailInfo fullInfo;
           plMemoryStreamReader proxyReader(&storage);
           plMemoryStreamReader fullReader(&storage);
-          const bool bProxyOk = loadedProxy.Load(proxyReader, plMeshResourceDescriptor::LoadDetail::ProxyIfAny, &proxyInfo).Succeeded() && proxyInfo.m_bLoadedProxy &&
+          const bool bProxyOk = loadedProxy.Load(proxyReader, 0, &proxyInfo).Succeeded() && proxyInfo.HasProxy() && proxyInfo.m_uiLoadedLevel == 0 &&
                                 loadedProxy.GetSubMeshes()[0].m_uiPrimitiveCount == uiProxyTriangles && loadedProxy.ValidateMeshletData().Succeeded();
-          const bool bFullOk = loadedFull.Load(fullReader, plMeshResourceDescriptor::LoadDetail::Full, &fullInfo).Succeeded() && !fullInfo.m_bLoadedProxy &&
-                               fullInfo.m_bHasProxy && loadedFull.GetSubMeshes()[0].m_uiPrimitiveCount == part.GetPolygons().GetCount() && loadedFull.ValidateMeshletData().Succeeded();
+          const bool bFullOk = loadedFull.Load(fullReader, plMeshResourceDescriptor::FullDetail, &fullInfo).Succeeded() && fullInfo.HasProxy() &&
+                               fullInfo.m_uiLoadedLevel == fullInfo.GetFullLevel() && loadedFull.GetSubMeshes()[0].m_uiPrimitiveCount == part.GetPolygons().GetCount() && loadedFull.ValidateMeshletData().Succeeded();
 
           plLog::Info("  proxy: {} tris ({}%), error {} (mesh radius {}), {} KB vs full {} KB, {} meshlets, {} ms, round trip proxy {} full {}", uiProxyTriangles,
             plArgF(100.0 * uiProxyTriangles / part.GetPolygons().GetCount(), 1), fProxyError, desc.GetBounds().m_fSphereRadius, uiProxyBytes / 1024,

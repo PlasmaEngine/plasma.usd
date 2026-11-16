@@ -89,7 +89,7 @@ namespace
     header.Write(writer).IgnoreResult();
 
     if (bProxy)
-      desc.SaveWithProxy(writer, proxy, fProxyLodError);
+      desc.SaveWithProxies(writer, plArrayPtr<plMeshResourceDescriptor>(&proxy, 1), plArrayPtr<const float>(&fProxyLodError, 1));
     else
       desc.Save(writer);
     CopyStorage(storage, out_data);
