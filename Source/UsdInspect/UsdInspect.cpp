@@ -1946,6 +1946,26 @@ namespace
           plLog::Info("  part {} LODs{}: {} in {} s, {} voxel groups; {} levels, {} meshlets, roots {} ({} tris), LOD0 {} of which {} never coarsen", p,
             bVoxelize ? " (voxels)" : "", res.Succeeded() ? "ok" : "FAILED", plArgF((plTime::Now() - t).GetSeconds(), 2), lodStats.m_uiVoxelGroups, uiMaxLevel + 1,
             meshlets.GetCount(), uiRoots, uiRootTris, uiLod0, uiLod0Roots);
+
+          // Where the roots are: per sub-mesh, the level and size of each root cluster.
+          if (bVoxelize)
+          {
+            for (plUInt32 s = 0; s < copy.GetSubMeshes().GetCount(); ++s)
+            {
+              const auto range = copy.GetSubMeshMeshletRange(s);
+              plStringBuilder sRoots;
+              plUInt32 uiSubRoots = 0;
+              for (plUInt32 m = range.m_uiFirstMeshlet; m < range.m_uiFirstMeshlet + range.m_uiMeshletCount; ++m)
+              {
+                const bool bRoot = links.IsEmpty() ? meshlets[m].m_uiLodLevel == uiMaxLevel : links[m].m_uiParentGroup == plInvalidIndex;
+                if (!bRoot)
+                  continue;
+                ++uiSubRoots;
+                sRoots.AppendFormat(" L{}:{}t", meshlets[m].m_uiLodLevel, meshlets[m].m_uiPrimitiveCount);
+              }
+              plLog::Info("    sub-mesh {} (material {}): {} meshlets, {} roots:{}", s, copy.GetSubMeshes()[s].m_uiMaterialIndex, range.m_uiMeshletCount, uiSubRoots, sRoots);
+            }
+          }
         }
       }
     }
