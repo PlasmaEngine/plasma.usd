@@ -15,7 +15,9 @@
 #include <EditorPluginUsd/UI/UsdRowDecorator.h>
 #include <EditorUi/Widgets.h>
 #include <Foundation/Configuration/Plugin.h>
+#include <ModelImporter2/FoliageCompositeSource.h>
 #include <ModelImporter2/ModelImporter.h>
+#include <UsdBridge/UsdFoliageComposite.h>
 #include <UsdBridge/UsdRuntime.h>
 #include <UsdBridge/UsdStage.h>
 
@@ -80,6 +82,25 @@ static void OnLoadPlugin()
     plModelImporter2::RegisterImporter(std::move(importer));
   }
 
+  // Composite trees (instanced parts on a skeleton) become Foliage Composite assets; transformed headless as well.
+  {
+    plModelImporter2::FoliageCompositeReaderRegistration reader;
+    for (plStringView sExtension : plUsdStage::GetFileExtensions())
+      reader.m_Extensions.PushBack(sExtension);
+    reader.m_sDisplayName = "OpenUSD tree";
+    reader.m_sProviderId = plUsdModelImporter::s_sProviderId;
+    reader.m_Reader = [](plStringView sFile, plModelImporter2::FoliageCompositeSource& out_source) -> plResult
+    {
+      const plStatus res = plUsdFoliageComposite::Read(sFile, out_source);
+      if (res.Failed())
+        plLog::Error("{}", res.m_sMessage);
+      return res.m_Result;
+    };
+    reader.m_Probe = [](plStringView sFile) -> bool
+    { return plUsdFoliageComposite::IsCompositeTree(sFile); };
+    plModelImporter2::RegisterFoliageCompositeReader(std::move(reader));
+  }
+
   // Headless editor processes (asset transforms) must not bring stages in: what a shipped scene contains comes from
   // Bake, never from a live link.
   if (plEditorApp::GetSingleton()->IsInHeadlessMode())
@@ -119,6 +140,7 @@ static void OnUnloadPlugin()
 {
   // The registry holds a factory that points into this DLL.
   plModelImporter2::UnregisterImporterProvider(plUsdModelImporter::s_sProviderId);
+  plModelImporter2::UnregisterFoliageCompositeReaderProvider(plUsdModelImporter::s_sProviderId);
 
   // Unregistering the panel destroys its content in the shell.
   if (plUsdLivePanel* pPanel = plUsdLivePanel::GetSingleton())
