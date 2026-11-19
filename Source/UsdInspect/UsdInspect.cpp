@@ -1956,6 +1956,12 @@ namespace
     plLog::Success("Built: {} bones; triangles flattened {}, stored {}, merged {} (LOD0 {}); {} voxel groups; switch error {} m (fraction {})", result.m_uiBones,
       result.m_Stats.m_uiFlatTriangles, result.m_Stats.m_uiPartTriangles, result.m_Stats.m_uiMergedTriangles, uiMergedTriangles, result.m_Stats.m_uiVoxelGroups,
       plArgF(result.m_fSwitchError, 4), options.m_fSwitchErrorFraction);
+    // Sway bounds: the merged mesh's bounds are grown by how far the bones can move it; the rest radius is what the switch
+    // error was derived from.
+    const float fRestRadius = options.m_fSwitchErrorFraction > 0.0f ? result.m_fSwitchError / options.m_fSwitchErrorFraction : 0.0f;
+    const float fSwayRadius = result.m_Merged.GetBounds().m_fSphereRadius;
+    plLog::Success("Sway bounds: radius {} m against the tree's {} m at rest ({}x)", plArgF(fSwayRadius, 2), plArgF(fRestRadius, 2),
+      plArgF(fRestRadius > 0.0f ? fSwayRadius / fRestRadius : 0.0f, 2));
     plLog::Success("Build {} s, total {} s, {}", plArgF(buildTime.GetSeconds(), 1), plArgF((plTime::Now() - start).GetSeconds(), 1), MemoryText());
     return 0;
   }
