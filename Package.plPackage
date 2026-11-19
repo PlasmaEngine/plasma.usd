@@ -8,7 +8,7 @@ PackageInfo
 {
 	// ---- identity -------------------------------------------------------------
 	string %Id{"plasma.usd"}
-	string %Version{"0.3.1"}
+	string %Version{"0.4.0"}
 	string %Publisher{"PlasmaTechnology"}
 	// OpenUSD and oneTBB are Apache-2.0 and come as DLLs, so their licences and notice are staged
 	// next to them in Bin/.

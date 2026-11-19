@@ -1928,8 +1928,24 @@ namespace
           plModelImporter2::MeshletLodStats lodStats;
           const plTime t = plTime::Now();
           const plResult res = plModelImporter2::GenerateMeshletLods(copy, lodOptions, lodStats);
-          plLog::Info("  part {} LODs{}: {} in {} s, {} voxel groups", p, bVoxelize ? " (voxels)" : "", res.Succeeded() ? "ok" : "FAILED",
-            plArgF((plTime::Now() - t).GetSeconds(), 2), lodStats.m_uiVoxelGroups);
+
+          // What a distant instance can never go below: the DAG roots. LOD0 roots are clusters that never coarsen.
+          plUInt32 uiMaxLevel = 0, uiRoots = 0, uiRootTris = 0, uiLod0Roots = 0, uiLod0 = 0;
+          const auto meshlets = copy.GetMeshlets();
+          const auto links = copy.GetMeshletGroupLinks();
+          for (const auto& meshlet : meshlets)
+            uiMaxLevel = plMath::Max<plUInt32>(uiMaxLevel, meshlet.m_uiLodLevel);
+          for (plUInt32 m = 0; m < meshlets.GetCount(); ++m)
+          {
+            const bool bRoot = links.IsEmpty() ? meshlets[m].m_uiLodLevel == uiMaxLevel : links[m].m_uiParentGroup == plInvalidIndex;
+            uiRoots += bRoot ? 1 : 0;
+            uiRootTris += bRoot ? meshlets[m].m_uiPrimitiveCount : 0;
+            uiLod0 += meshlets[m].m_uiLodLevel == 0 ? 1 : 0;
+            uiLod0Roots += (bRoot && meshlets[m].m_uiLodLevel == 0) ? 1 : 0;
+          }
+          plLog::Info("  part {} LODs{}: {} in {} s, {} voxel groups; {} levels, {} meshlets, roots {} ({} tris), LOD0 {} of which {} never coarsen", p,
+            bVoxelize ? " (voxels)" : "", res.Succeeded() ? "ok" : "FAILED", plArgF((plTime::Now() - t).GetSeconds(), 2), lodStats.m_uiVoxelGroups, uiMaxLevel + 1,
+            meshlets.GetCount(), uiRoots, uiRootTris, uiLod0, uiLod0Roots);
         }
       }
     }
