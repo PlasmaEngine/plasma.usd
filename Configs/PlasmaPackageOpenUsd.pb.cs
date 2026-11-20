@@ -79,7 +79,7 @@ public static class PlasmaPackageOpenUsd
             CopyIfDifferent(Path.Combine(root, "NOTICE-OpenUSD.txt"), Path.Combine(binaryDirectory, "OpenUSD-NOTICE.txt"));
             CopyIfDifferent(Path.Combine(root, "LICENSE-oneTBB.txt"), Path.Combine(binaryDirectory, "oneTBB-LICENSE.txt"));
 
-            // The Blender, Houdini and Maya connectors, which the USD Live panel's Apps tab installs into those tools. Staged
+            // The Blender, Houdini, Maya and 3ds Max connectors, which the USD Live panel's Apps tab installs into those tools. Staged
             // beside the plugin so an installed package has them; Python caches from running them in place stay behind.
             CopyTree(Path.Combine(context.ProjectRoot, "Connectors"), Path.Combine(binaryDirectory, "connectors"),
                 relative => !relative.Contains("__pycache__") && !relative.EndsWith(".pyc", StringComparison.OrdinalIgnoreCase));

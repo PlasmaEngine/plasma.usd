@@ -66,7 +66,7 @@ namespace
     {"Usd.OpenInBlender", "Open in Blender", "Open the stage in Blender, in a live session. A session is started first when there is none."},
     {"Usd.BakeNow", "Bake Now", "Rebuild every mesh and material of the stage and write its bake prefab, which exports and games use."},
     {"Usd.OpenUsdPrefab", "Open USD Prefab", "Open the prefab this object was placed from. It streams its USD stage live."},
-    {"Usd.Apps.Install", "Install Connector", "Install or update a tool's USD Live connector. The value names the tool: Blender, Houdini or Maya."},
+    {"Usd.Apps.Install", "Install Connector", "Install or update a tool's USD Live connector. The value names the tool: Blender, Houdini, Maya or 3ds Max."},
     {"Usd.Apps.Remove", "Remove Connector", "Remove the USD Live connector the Apps tab installed into a tool. The value names the tool."},
     {"Usd.Apps.Open", "Open in App", "Open the USD Live panel's stage in a tool, in a live session. The value names the tool."},
     {"UsdImport.ImportPartition", "World Partition from USD", "Import a USD stage as the cells of a world partition. The value holds the import options as JSON; without it the import dialog opens."},
@@ -550,7 +550,7 @@ void plUsdAction::Execute(const plVariant& value)
       plUsdApps::App app;
       if (pApps == nullptr || !plUsdApps::FindApp(sApp, app))
       {
-        plLog::Error("USD Live: '{}' is not a tool with a connector; use Blender, Houdini or Maya.", sApp);
+        plLog::Error("USD Live: '{}' is not a tool with a connector; use Blender, Houdini, Maya or 3ds Max.", sApp);
         return;
       }
 

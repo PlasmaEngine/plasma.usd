@@ -76,7 +76,7 @@ public:
     // Shown for a placed USD prefab: an instance of a prefab whose content is a USD link.
     OpenUsdPrefab,
 
-    // Global. The value names the tool ("Blender", "Houdini", "Maya"); the selected installation in the Apps tab is used,
+    // Global. The value names the tool ("Blender", "Houdini", "Maya", "3ds Max"); the selected installation in the Apps tab is used,
     // and Open works on the link the USD Live panel shows. Failures are logged and shown in the tool's row, never in a
     // dialog.
     AppsInstall,

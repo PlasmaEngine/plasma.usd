@@ -18,7 +18,7 @@ public class EditorPluginUsdModule : ModuleRules
         // The live hub is a local TCP server on Winsock.
         PrivateLibraries.Add("Ws2_32.lib");
 
-        // The Apps tab reads where Houdini and Maya are installed from the registry.
+        // The Apps tab reads where Houdini, Maya and 3ds Max are installed from the registry.
         PrivateLibraries.Add("Advapi32.lib");
 
         // The Apps tab shows each tool with its executable's icon.

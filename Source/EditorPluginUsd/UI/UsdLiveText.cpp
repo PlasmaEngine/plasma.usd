@@ -69,6 +69,7 @@ void plUsdLiveText::SplitParticipant(plStringView sLayerFile, plString& out_sToo
     {"blender", "Blender"},
     {"houdini", "Houdini"},
     {"maya", "Maya"},
+    {"max", "3ds Max"},
     {"unreal", "Unreal"},
   };
 

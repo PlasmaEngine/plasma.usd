@@ -52,6 +52,7 @@ namespace
     {"Blender", "blender.exe", "4.2", "Blender"},
     {"Houdini", "houdini*.exe", "20.5", "Houdini"},
     {"Maya", "maya.exe", "2024", "Maya"},
+    {"3ds Max", "3dsmax.exe", "2024", "3dsMax"},
   };
 
   const AppTraits& Traits(App app)
@@ -227,6 +228,8 @@ namespace
         return ReadAssignedString(plStringBuilder(sFolder, "/plasma_usd_live/blender_manifest.toml"), "version");
       case App::Houdini:
         return ReadAssignedString(plStringBuilder(sFolder, "/python3.11libs/plasma_usd_live/__init__.py"), "__version__");
+      case App::Max:
+        return ReadAssignedString(plStringBuilder(sFolder, "/Contents/python/plasma_usd_live/__init__.py"), "__version__");
       default:
         return ReadAssignedString(plStringBuilder(sFolder, "/scripts/plasma_usd_live/__init__.py"), "__version__");
     }
@@ -265,6 +268,17 @@ namespace
   {
     const plString sAppFolder = plEnvironmentVariableUtils::GetValueString("MAYA_APP_DIR");
     return CleanPath(plStringBuilder(sAppFolder.IsEmpty() ? plStringBuilder(DocumentsFolder(), "/maya") : plStringBuilder(sAppFolder), "/modules"));
+  }
+
+  /// The folder of the application package 3ds Max loads the connector from. %APPDATA%/Autodesk/ApplicationPlugins is
+  /// read by every 3ds Max version, for the current user only.
+  plString MaxPackageFolder()
+  {
+    plStringBuilder sBase = plEnvironmentVariableUtils::GetValueString("APPDATA");
+    if (sBase.IsEmpty())
+      return {};
+
+    return CleanPath(plStringBuilder(sBase, "/Autodesk/ApplicationPlugins/PlasmaUsdLive"));
   }
 
   void GetProgramFilesFolders(plDynamicArray<plString>& out_folders)
@@ -375,9 +389,9 @@ namespace
 
   plString VersionFromExecutable(App app, plStringView sExecutable)
   {
-    // Blender's executable sits in its installation folder; Houdini's and Maya's in bin/ below it.
+    // Blender's and 3ds Max's executables sit in their installation folders; Houdini's and Maya's in bin/ below them.
     plString sFolder = ParentFolder(sExecutable);
-    if (app != App::Blender)
+    if (app != App::Blender && app != App::Max)
       sFolder = ParentFolder(sFolder);
 
     return VersionFromFolderName(plStringView(sFolder).GetFileNameAndExtension(), Traits(app).m_szName);
@@ -560,9 +574,22 @@ const char* plUsdApps::GetName(App app)
 
 bool plUsdApps::FindApp(plStringView sName, App& out_app)
 {
+  // "3ds Max" is also taken as "3dsMax", and as "Max".
+  plStringBuilder sWanted = sName;
+  sWanted.ReplaceAll(" ", "");
+
+  if (sWanted.IsEqual_NoCase("Max"))
+  {
+    out_app = App::Max;
+    return true;
+  }
+
   for (int i = 0; i < (int)App::Count; ++i)
   {
-    if (sName.IsEqual_NoCase(s_Traits[i].m_szName))
+    plStringBuilder sKnown = s_Traits[i].m_szName;
+    sKnown.ReplaceAll(" ", "");
+
+    if (sWanted.IsEqual_NoCase(sKnown))
     {
       out_app = (App)i;
       return true;
@@ -738,6 +765,41 @@ void plUsdApps::ScanInstalls(App app, plDynamicArray<Install>& out_installs) con
       break;
     }
 
+    case App::Max:
+    {
+      // Each version is a key named by its internal version, "27.0" for 3ds Max 2025, holding its folder as Installdir.
+      ReadRegistry("SOFTWARE\\Autodesk\\3dsMax", true, names);
+      for (const plString& sKey : names)
+      {
+        const plStringBuilder sKeyPath("SOFTWARE\\Autodesk\\3dsMax\\", sKey);
+        plString sFolder = CleanPath(ReadRegistryString(sKeyPath, "Installdir"));
+        if (sFolder.IsEmpty())
+          sFolder = CleanPath(ReadRegistryString(sKeyPath, "InstallPath"));
+        if (sFolder.IsEmpty())
+          continue;
+
+        plString sVersion = VersionFromFolderName(plStringView(sFolder).GetFileNameAndExtension(), "3ds Max");
+        const Version internal = ToVersion(sKey);
+        if (sVersion.IsEmpty() && !internal.IsEmpty() && internal[0] >= 20)
+        {
+          plStringBuilder sYear;
+          sYear.SetFormat("{}", internal[0] + 1998);
+          sVersion = sYear;
+        }
+
+        AddInstall(out_installs, plStringBuilder(sFolder, "/3dsmax.exe"), sVersion, false);
+      }
+
+      for (const plString& sProgramFiles : programFiles)
+      {
+        const plStringBuilder sVendor(sProgramFiles, "/Autodesk");
+        ListFolders(sVendor, "3ds Max *", names);
+        for (const plString& sInstall : names)
+          AddInstall(out_installs, plStringBuilder(sVendor, "/", sInstall, "/3dsmax.exe"), VersionFromFolderName(sInstall, "3ds Max"), false);
+      }
+      break;
+    }
+
     default:
       break;
   }
@@ -810,6 +872,9 @@ void plUsdApps::EvaluateConnector(App app, Install& ref_install) const
       break;
     case App::Maya:
       EvaluateMaya(ref_install);
+      break;
+    case App::Max:
+      EvaluateMax(ref_install);
       break;
     default:
       break;
@@ -1027,6 +1092,38 @@ void plUsdApps::EvaluateMaya(Install& ref_install) const
   }
 }
 
+void plUsdApps::EvaluateMax(Install& ref_install) const
+{
+  Connector& connector = ref_install.m_Connector;
+  connector = {};
+
+  const plString sPackage = MaxPackageFolder();
+  if (sPackage.IsEmpty() || !plOSFile::ExistsFile(plStringBuilder(sPackage, "/PackageContents.xml")))
+  {
+    connector.m_State = ConnectorState::NotInstalled;
+    connector.m_sPath = sPackage;
+    return;
+  }
+
+  // install.py writes a package whose startup scripts load the package source, and names that folder in linked.txt.
+  plStringBuilder sLinked;
+  if (ReadTextFile(plStringBuilder(sPackage, "/Contents/linked.txt"), sLinked))
+  {
+    sLinked.Trim();
+    const plString sSource = CleanPath(sLinked);
+    connector.m_State = ConnectorState::Linked;
+    connector.m_sVersion = ReadConnectorVersion(App::Max, sSource);
+    connector.m_sLocation = plStringBuilder("linked to ", sSource);
+    connector.m_sPath = sPackage;
+    return;
+  }
+
+  connector.m_sVersion = ReadConnectorVersion(App::Max, sPackage);
+  connector.m_State = IsOlder(connector.m_sVersion, GetState(App::Max).m_sPackagedVersion) ? ConnectorState::Outdated : ConnectorState::Installed;
+  connector.m_sLocation = plStringBuilder("package in ", ParentFolder(sPackage));
+  connector.m_sPath = sPackage;
+}
+
 void plUsdApps::UpdateRunning()
 {
   const plTime now = plTime::Now();
@@ -1048,7 +1145,8 @@ void plUsdApps::UpdateRunning()
     {
       plStringBuilder sName = plStringUtf8(entry.szExeFile).GetData();
       sName.ToLower();
-      if (!sName.StartsWith("blender") && !sName.StartsWith("houdini") && !sName.StartsWith("happrentice") && !sName.StartsWith("hindie") && !sName.StartsWith("maya"))
+      if (!sName.StartsWith("blender") && !sName.StartsWith("houdini") && !sName.StartsWith("happrentice") && !sName.StartsWith("hindie") && !sName.StartsWith("maya") &&
+          !sName.StartsWith("3dsmax"))
         continue;
 
       HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
@@ -1366,7 +1464,20 @@ plStatus plUsdApps::DoInstall(App app)
     return plStatus(PL_SUCCESS);
   }
 
-  const plStatus res = app == App::Houdini ? InstallHoudini(*pInstall) : InstallMaya(*pInstall);
+  plStatus res(PL_SUCCESS);
+  switch (app)
+  {
+    case App::Houdini:
+      res = InstallHoudini(*pInstall);
+      break;
+    case App::Max:
+      res = InstallMax(*pInstall);
+      break;
+    default:
+      res = InstallMaya(*pInstall);
+      break;
+  }
+
   if (res.Succeeded())
   {
     plLog::Info("USD Live: installed the {} connector {} for {} {}", GetName(app), state.m_sPackagedVersion, GetName(app), pInstall->m_sVersion);
@@ -1418,7 +1529,20 @@ plStatus plUsdApps::DoRemove(App app)
     return plStatus(PL_SUCCESS);
   }
 
-  const plStatus res = app == App::Houdini ? RemoveHoudini(*pInstall) : RemoveMaya(*pInstall);
+  plStatus res(PL_SUCCESS);
+  switch (app)
+  {
+    case App::Houdini:
+      res = RemoveHoudini(*pInstall);
+      break;
+    case App::Max:
+      res = RemoveMax(*pInstall);
+      break;
+    default:
+      res = RemoveMaya(*pInstall);
+      break;
+  }
+
   if (res.Succeeded())
     plLog::Info("USD Live: removed the {} connector from {} {}", GetName(app), GetName(app), pInstall->m_sVersion);
 
@@ -1570,6 +1694,22 @@ plStatus plUsdApps::RemoveMaya(const Install& install)
 {
   const plString sModules = MayaModulesFolder();
   return RemoveInstalledCopy(plStringBuilder(sModules, "/plasma_usd_live.mod"), plStringBuilder(sModules, "/plasma_usd_live"));
+}
+
+plStatus plUsdApps::InstallMax(const Install& install)
+{
+  const plString sPackage = MaxPackageFolder();
+  if (sPackage.IsEmpty())
+    return plStatus("APPDATA is not set, so 3ds Max's ApplicationPlugins folder is not known.");
+
+  // The package as it is in the connectors, PackageContents.xml at its top; 3ds Max finds it there at its next start.
+  const char* const skip[] = {"install.py"};
+  return ReplaceFolder(plStringBuilder(m_sConnectorFolder, "/", Traits(App::Max).m_szConnectorFolder), sPackage, skip);
+}
+
+plStatus plUsdApps::RemoveMax(const Install& install)
+{
+  return RemoveInstalledCopy(plStringBuilder(MaxPackageFolder(), "/PackageContents.xml"), MaxPackageFolder());
 }
 
 plStatus plUsdApps::Locate(App app)
