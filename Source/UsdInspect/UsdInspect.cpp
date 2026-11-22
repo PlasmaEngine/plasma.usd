@@ -7,9 +7,11 @@
 #include <Foundation/Logging/ConsoleWriter.h>
 #include <Foundation/Strings/PathUtils.h>
 #include <Foundation/Strings/StringConversion.h>
+#include <ModelImporter2/FoliageCompositeSource.h>
 #include <ModelImporter2/MeshletLodGenerator.h>
 #include <RendererCore/Meshes/MeshResourceDescriptor.h>
 #include <UsdBridge/UsdBasis.h>
+#include <UsdBridge/UsdFoliageComposite.h>
 #include <UsdBridge/UsdMtlxFileFormat.h>
 #include <UsdBridge/UsdPartitionScan.h>
 #include <UsdBridge/UsdRuntime.h>
@@ -29,6 +31,8 @@
 // plUsdInspect --texture <output.dds> <colour file> [opacity file]
 // plUsdInspect <stage.usda> [--geometry]
 // plUsdInspect <stage.usda> --profile [max mesh builds] [tangents]
+// plUsdInspect <tree.usd> --foliage-composite [read | parts]   (reads a composite tree and builds it with the default
+//              options; read stops after reading, parts first times each part's LOD build on its own)
 // plUsdInspect <asset.usda> --roundtrip <primPath>
 // plUsdInspect <stage.usda | document.mtlx> --materialx <absolute path of plEditorPluginMaterialX.dll>
 // plUsdInspect --partition-list <stage> [primPath]
@@ -1840,6 +1844,163 @@ namespace
     plLog::Info("Total time {} s, {}", plArgF((plTime::Now() - totalStart).GetSeconds(), 1), MemoryText());
     return 0;
   }
+
+  /// Reads a composite tree and builds it with the default options, as the Foliage Composite asset does.
+  int FoliageComposite(plStringView sFile, bool bReadOnly, bool bProfileParts)
+  {
+    const plTime start = plTime::Now();
+
+    if (!plUsdFoliageComposite::IsCompositeTree(sFile))
+      plLog::Warning("The probe does not recognise '{}' as a composite tree.", sFile);
+
+    plModelImporter2::FoliageCompositeSource source;
+    const plStatus read = plUsdFoliageComposite::Read(sFile, source);
+    if (read.Failed())
+      return Fail(read.m_sMessage);
+
+    const plTime readTime = plTime::Now() - start;
+
+    plUInt32 orders[4] = {};
+    for (plUInt8 uiOrder : source.m_JointOrders)
+      ++orders[plMath::Min<plUInt8>(uiOrder, 3)];
+
+    plStringBuilder sMaterials;
+    for (const plString& sName : source.m_MaterialNames)
+      sMaterials.AppendWithSeparator(", ", sName);
+
+    plLog::Info("Read in {} s, {}", plArgF(readTime.GetSeconds(), 2), MemoryText());
+    plLog::Info("Joints: {} (orders trunk {}, limb {}, branch {}, twig {}); ground cover {}, gust attenuation {}", source.m_JointPositions.GetCount(), orders[0], orders[1],
+      orders[2], orders[3], source.m_bGroundCover ? "yes" : "no", source.m_fGustAttenuation);
+    plLog::Info("Materials: {}", sMaterials);
+
+    plDynamicArray<plUInt32> instances;
+    instances.SetCount(source.m_Parts.GetCount());
+    plUInt32 uiBound = 0;
+    for (const auto& inst : source.m_Instances)
+    {
+      ++instances[inst.m_uiPart];
+      uiBound += inst.m_Joints.IsEmpty() ? 0 : 1;
+    }
+
+    for (plUInt32 p = 0; p < source.m_Parts.GetCount(); ++p)
+    {
+      plUInt32 uiTriangles = 0;
+      for (const auto& subMesh : source.m_Parts[p].GetSubMeshes())
+        uiTriangles += subMesh.m_uiPrimitiveCount;
+      plLog::Info("  part {} '{}': {} triangles, {} vertices, {} sub-meshes, {} instances", p, source.m_PartNames[p], uiTriangles,
+        source.m_Parts[p].MeshBufferDesc().GetVertexCount(), source.m_Parts[p].GetSubMeshes().GetCount(), instances[p]);
+    }
+
+    plLog::Info("Parts: {}, instances: {} ({} with bind joints); triangles flattened {}, stored {}", source.m_Parts.GetCount(), source.m_Instances.GetCount(), uiBound,
+      source.GetFlattenedTriangleCount(), source.GetPartTriangleCount());
+
+    // Rest-pose size of the tree and of its skeleton, before the build grows bounds for the sway.
+    {
+      plBoundingBox box = plBoundingBox::MakeInvalid();
+      for (const auto& inst : source.m_Instances)
+      {
+        plBoundingBoxSphere bounds = source.m_Parts[inst.m_uiPart].GetBounds();
+        bounds.Transform(inst.m_Transform.GetAsMat4());
+        box.ExpandToInclude(bounds.GetBox());
+      }
+      plBoundingBox joints = plBoundingBox::MakeInvalid();
+      for (const plVec3& v : source.m_JointPositions)
+        joints.ExpandToInclude(v);
+      plLog::Info("Rest bounds: min ({}, {}, {}) max ({}, {}, {}), radius {} m", plArgF(box.m_vMin.x, 2), plArgF(box.m_vMin.y, 2), plArgF(box.m_vMin.z, 2),
+        plArgF(box.m_vMax.x, 2), plArgF(box.m_vMax.y, 2), plArgF(box.m_vMax.z, 2), plArgF(box.GetHalfExtents().GetLength(), 2));
+      plLog::Info("Joints span ({}, {}, {}) to ({}, {}, {})", plArgF(joints.m_vMin.x, 2), plArgF(joints.m_vMin.y, 2), plArgF(joints.m_vMin.z, 2), plArgF(joints.m_vMax.x, 2),
+        plArgF(joints.m_vMax.y, 2), plArgF(joints.m_vMax.z, 2));
+    }
+
+    if (bReadOnly)
+      return 0;
+
+    if (bProfileParts)
+    {
+      // The LOD build of each part on its own, as the composite build runs it.
+      for (plUInt32 p = 0; p < source.m_Parts.GetCount(); ++p)
+      {
+        for (bool bVoxelize : {true, false})
+        {
+          plMeshResourceDescriptor copy = source.m_Parts[p];
+          plModelImporter2::MeshletLodOptions lodOptions;
+          lodOptions.m_bVoxelize = bVoxelize;
+          plModelImporter2::MeshletLodStats lodStats;
+          const plTime t = plTime::Now();
+          const plResult res = plModelImporter2::GenerateMeshletLods(copy, lodOptions, lodStats);
+
+          // What a distant instance can never go below: the DAG roots. LOD0 roots are clusters that never coarsen.
+          plUInt32 uiMaxLevel = 0, uiRoots = 0, uiRootTris = 0, uiLod0Roots = 0, uiLod0 = 0;
+          const auto meshlets = copy.GetMeshlets();
+          const auto links = copy.GetMeshletGroupLinks();
+          for (const auto& meshlet : meshlets)
+            uiMaxLevel = plMath::Max<plUInt32>(uiMaxLevel, meshlet.m_uiLodLevel);
+          for (plUInt32 m = 0; m < meshlets.GetCount(); ++m)
+          {
+            const bool bRoot = links.IsEmpty() ? meshlets[m].m_uiLodLevel == uiMaxLevel : links[m].m_uiParentGroup == plInvalidIndex;
+            uiRoots += bRoot ? 1 : 0;
+            uiRootTris += bRoot ? meshlets[m].m_uiPrimitiveCount : 0;
+            uiLod0 += meshlets[m].m_uiLodLevel == 0 ? 1 : 0;
+            uiLod0Roots += (bRoot && meshlets[m].m_uiLodLevel == 0) ? 1 : 0;
+          }
+          plLog::Info("  part {} LODs{}: {} in {} s, {} voxel groups; {} levels, {} meshlets, roots {} ({} tris), LOD0 {} of which {} never coarsen", p,
+            bVoxelize ? " (voxels)" : "", res.Succeeded() ? "ok" : "FAILED", plArgF((plTime::Now() - t).GetSeconds(), 2), lodStats.m_uiVoxelGroups, uiMaxLevel + 1,
+            meshlets.GetCount(), uiRoots, uiRootTris, uiLod0, uiLod0Roots);
+
+          // Where the roots are: per sub-mesh, the level and size of each root cluster.
+          if (bVoxelize)
+          {
+            for (plUInt32 s = 0; s < copy.GetSubMeshes().GetCount(); ++s)
+            {
+              const auto range = copy.GetSubMeshMeshletRange(s);
+              plStringBuilder sRoots;
+              plUInt32 uiSubRoots = 0;
+              for (plUInt32 m = range.m_uiFirstMeshlet; m < range.m_uiFirstMeshlet + range.m_uiMeshletCount; ++m)
+              {
+                const bool bRoot = links.IsEmpty() ? meshlets[m].m_uiLodLevel == uiMaxLevel : links[m].m_uiParentGroup == plInvalidIndex;
+                if (!bRoot)
+                  continue;
+                ++uiSubRoots;
+                sRoots.AppendFormat(" L{}:{}t", meshlets[m].m_uiLodLevel, meshlets[m].m_uiPrimitiveCount);
+              }
+              plLog::Info("    sub-mesh {} (material {}): {} meshlets, {} roots:{}", s, copy.GetSubMeshes()[s].m_uiMaterialIndex, range.m_uiMeshletCount, uiSubRoots, sRoots);
+            }
+          }
+        }
+      }
+    }
+
+    plModelImporter2::FoliageCompositeBuildOptions options;
+    options.m_LodOptions.m_bVoxelize = true;
+    for (plUInt32 p = 0; p < source.m_Parts.GetCount(); ++p)
+    {
+      plStringBuilder sId;
+      sId.SetFormat("AssetCache/Common/Inspect-part{}.plBinMesh", p);
+      options.m_PartResourceIds.PushBack(sId);
+    }
+
+    const plTime buildStart = plTime::Now();
+    plModelImporter2::FoliageCompositeBuildResult result;
+    if (plModelImporter2::BuildFoliageCompositeFromSource(source, options, result).Failed())
+      return Fail("BuildFoliageCompositeFromSource failed.");
+    const plTime buildTime = plTime::Now() - buildStart;
+
+    plUInt32 uiMergedTriangles = 0;
+    for (const auto& subMesh : result.m_Merged.GetSubMeshes())
+      uiMergedTriangles += subMesh.m_uiPrimitiveCount;
+
+    plLog::Success("Built: {} bones; triangles flattened {}, stored {}, merged {} (LOD0 {}); {} voxel groups; switch error {} m (fraction {})", result.m_uiBones,
+      result.m_Stats.m_uiFlatTriangles, result.m_Stats.m_uiPartTriangles, result.m_Stats.m_uiMergedTriangles, uiMergedTriangles, result.m_Stats.m_uiVoxelGroups,
+      plArgF(result.m_fSwitchError, 4), options.m_fSwitchErrorFraction);
+    // Sway bounds: the merged mesh's bounds are grown by how far the bones can move it; the rest radius is what the switch
+    // error was derived from.
+    const float fRestRadius = options.m_fSwitchErrorFraction > 0.0f ? result.m_fSwitchError / options.m_fSwitchErrorFraction : 0.0f;
+    const float fSwayRadius = result.m_Merged.GetBounds().m_fSphereRadius;
+    plLog::Success("Sway bounds: radius {} m against the tree's {} m at rest ({}x)", plArgF(fSwayRadius, 2), plArgF(fRestRadius, 2),
+      plArgF(fRestRadius > 0.0f ? fSwayRadius / fRestRadius : 0.0f, 2));
+    plLog::Success("Build {} s, total {} s, {}", plArgF(buildTime.GetSeconds(), 1), plArgF((plTime::Now() - start).GetSeconds(), 1), MemoryText());
+    return 0;
+  }
 } // namespace
 
 int main(int argc, const char** argv)
@@ -1911,6 +2072,10 @@ int main(int argc, const char** argv)
     else if (argc >= 4 && plStringView(argv[2]) == "--mesh-profile")
     {
       iResult = MeshProfile(sFile, argv[3]);
+    }
+    else if (argc >= 3 && plStringView(argv[2]) == "--foliage-composite")
+    {
+      iResult = FoliageComposite(sFile, argc >= 4 && plStringView(argv[3]) == "read", argc >= 4 && plStringView(argv[3]) == "parts");
     }
     else if (argc >= 3 && plStringView(argv[2]) == "--light-test")
     {
