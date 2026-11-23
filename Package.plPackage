@@ -16,9 +16,9 @@ PackageInfo
 	string %Homepage{"https://plasmagameengine.com"}
 
 	// ---- compatibility --------------------------------------------------------
-	string %MinEngineVersion{"0.12.1"}
-	string %MaxEngineVersion{"0.12.1"}
-	string %AbiTag{"win64-msvc19-0.12.1-abi7-dev"}
+	string %MinEngineVersion{"0.12.2"}
+	string %MaxEngineVersion{"0.12.2"}
+	string %AbiTag{"win64-msvc19-0.12.2-abi7-dev"}
 
 	// ---- presentation ---------------------------------------------------------
 	string %DisplayName{"USD Live Link"}
